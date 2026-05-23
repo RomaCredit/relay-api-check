@@ -4,6 +4,8 @@ Browser-based **relay / API gateway compatibility checker** for OpenAI-compatibl
 
 Test whether a third-party relay matches expected routes, auth headers, streaming (SSE), and response shapes — with raw request/response JSON and a compliance checklist.
 
+**Repository:** [github.com/RomaCredit/relay-api-check](https://github.com/RomaCredit/relay-api-check)
+
 Live demo: [https://check.romaapi.com](https://check.romaapi.com)
 
 ## Features
