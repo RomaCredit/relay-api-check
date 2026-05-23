@@ -164,7 +164,6 @@
   .scenario-list { display: flex; flex-direction: column; gap: 4px; }
   .scenario-btn { text-align: left; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 12px; cursor: pointer; transition: all .15s; }
   .scenario-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .spec-hint { font-size: 11px; color: var(--text-dimmer); line-height: 1.5; margin-top: 8px; padding: 8px; background: var(--surface2); border-radius: 6px; border: 1px dashed var(--border); }
   .check-list { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
   .check-item { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); }
   .check-item.pass { border-color: rgba(34,197,94,.35); }
@@ -200,7 +199,6 @@
     <div class="panel-section">
       <div class="section-title">测试场景</div>
       <div class="scenario-list" id="scenario-list"></div>
-      <div class="spec-hint" id="spec-hint">选择场景或发送请求后，将对照官方常见字段做兼容性检查。</div>
     </div>
 
     <!-- Saved Configs -->
@@ -352,7 +350,6 @@ function selectModel(val) {
 function onModelInput() {
   renderModelPresets();
   if (currentEndpoint === 'auto') updateAutoHint();
-  updateSpecHint();
   autoSave();
 }
 
@@ -409,7 +406,7 @@ let lastResponse = { text: '', json: null, request: null, responseDetail: null, 
 const SCENARIOS = [
   { id: 'anthropic-stream', name: 'Anthropic · 流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: true, user: '用一句话回复：兼容性检测通过' },
   { id: 'anthropic-sync', name: 'Anthropic · 非流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: false, user: '用一句话回复：兼容性检测通过' },
-  { id: 'chat-stream', name: 'OpenAI Chat · 流式', model: 'gpt-4o-mini', endpoint: 'chat', stream: true, user: '用一句话回复：兼容性检测通过' },
+  { id: 'chat-stream', name: 'OpenAI Chat · 流式', model: 'gpt-5.4', endpoint: 'chat', stream: true, user: '用一句话回复：兼容性检测通过' },
   { id: 'responses-stream', name: 'OpenAI Responses · 流式', model: 'gpt-5.4', endpoint: 'responses', stream: true, user: '用一句话回复：兼容性检测通过' },
 ];
 
@@ -433,7 +430,7 @@ let isStreaming = false;
   if (saved.useProxy !== undefined) document.getElementById('proxy-toggle').checked = saved.useProxy;
   if (saved.endpoint) {
     const m = (saved.model || '').trim().toLowerCase();
-    if (saved.endpoint === 'chat' && (m === 'gpt-5.4' || m === 'gpt-5.5' || m.startsWith('gemini'))) {
+    if (saved.endpoint === 'chat' && m.startsWith('gemini')) {
       setEndpoint('auto');
     } else {
       setEndpoint(saved.endpoint);
@@ -501,7 +498,6 @@ async function apiFetch(url, reqHeaders, body, signal) {
 
 renderModelPresets();
 updateAutoHint();
-updateSpecHint();
 renderScenarios();
 renderConfigs();
 renderHistory();
@@ -516,19 +512,12 @@ function setEndpoint(ep) {
   currentEndpoint = ep;
   document.querySelectorAll('.ep-tab').forEach(t => t.classList.toggle('active', t.dataset.ep === ep));
   if (ep === 'auto') updateAutoHint();
-  updateSpecHint();
   if (typeof autoSave === 'function') autoSave();
 }
 
 function getResolvedEndpoint() {
   const model = document.getElementById('model').value.trim();
   return currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
-}
-
-function updateSpecHint() {
-  const ep = getResolvedEndpoint();
-  const el = document.getElementById('spec-hint');
-  if (el) el.innerHTML = `<strong>官方常见形态</strong><br><code>${SPEC_REFS[ep] || ''}</code>`;
 }
 
 function renderScenarios() {
