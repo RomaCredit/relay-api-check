@@ -1,0 +1,20 @@
+# Standalone: Caddy serves frontend + reverse_proxy to api-check-proxy
+:80 {
+	handle /api/proxy* {
+		reverse_proxy proxy:8090 {
+			flush_interval -1
+			transport http {
+				dial_timeout 30s
+				response_header_timeout 900s
+				read_timeout 900s
+			}
+			request_buffers 0
+			response_buffers 0
+		}
+	}
+
+	handle {
+		root * /srv
+		file_server
+	}
+}

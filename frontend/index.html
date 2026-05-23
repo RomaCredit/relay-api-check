@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Relay API Check — 中转站 API 兼容性检测</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3248;
+    --accent: #5b6af0;
+    --accent-hover: #6b7af8;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #f59e0b;
+    --text: #e2e4f0;
+    --text-dim: #8892b0;
+    --text-dimmer: #4a5280;
+    --radius: 8px;
+    --mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', sans-serif; font-size: 14px; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* ── Header ── */
+  header { display: flex; align-items: center; gap: 12px; padding: 0 16px; height: 48px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--surface); }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: -.2px; }
+  .badge { font-size: 10px; padding: 2px 7px; border-radius: 20px; background: var(--accent); color: #fff; font-weight: 600; }
+  header .spacer { flex: 1; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dimmer); transition: background .3s; }
+  .status-dot.ok { background: var(--green); }
+  .status-dot.err { background: var(--red); }
+  .status-dot.loading { background: var(--yellow); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  #status-text { font-size: 12px; color: var(--text-dim); }
+
+  /* ── Layout ── */
+  .layout { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Left Panel ── */
+  .left-panel { width: 280px; flex-shrink: 0; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); overflow-y: auto; }
+  .panel-section { padding: 14px 14px 10px; border-bottom: 1px solid var(--border); }
+  .panel-section:last-child { border-bottom: none; }
+  .section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--text-dimmer); margin-bottom: 10px; }
+
+  /* Saved Configs */
+  .config-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; }
+  .config-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--radius); cursor: pointer; border: 1px solid transparent; transition: all .15s; }
+  .config-item:hover { background: var(--surface2); }
+  .config-item.active { background: rgba(91,106,240,.15); border-color: rgba(91,106,240,.4); }
+  .config-item .config-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .config-item .config-del { opacity: 0; font-size: 16px; color: var(--text-dimmer); line-height: 1; padding: 0 2px; cursor: pointer; }
+  .config-item:hover .config-del { opacity: 1; }
+  .config-item .config-del:hover { color: var(--red); }
+  .btn-save-config { width: 100%; margin-top: 8px; }
+
+  /* Form */
+  label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; margin-top: 10px; }
+  label:first-of-type { margin-top: 0; }
+  input, select, textarea {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text); border-radius: var(--radius); padding: 7px 10px;
+    font-size: 13px; font-family: inherit; outline: none; transition: border-color .15s;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+  select option { background: var(--surface2); }
+  .input-row { display: flex; gap: 6px; }
+  .input-row input { flex: 1; }
+  .icon-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text-dim); border-radius: var(--radius); padding: 7px 10px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: all .15s; }
+  .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Params row */
+  .params-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .param-group { display: flex; flex-direction: column; }
+  .param-group label { margin-top: 0; }
+
+  /* Endpoint toggle */
+  .endpoint-tabs { display: flex; gap: 4px; margin-top: 2px; }
+  .ep-tab { flex: 1; text-align: center; padding: 6px 4px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--text-dim); transition: all .15s; }
+  .ep-tab.active { background: rgba(91,106,240,.2); border-color: var(--accent); color: var(--accent); }
+
+  /* ── Center ── */
+  .center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .msg-area { flex: 1; display: flex; flex-direction: column; padding: 14px; gap: 10px; overflow: hidden; }
+  .msg-block { display: flex; flex-direction: column; }
+  .msg-block label { margin-bottom: 5px; margin-top: 0; }
+  .msg-block textarea { flex: 1; resize: none; font-family: var(--mono); font-size: 13px; line-height: 1.6; }
+  #system-prompt { height: 70px; }
+  #user-message { flex: 1; min-height: 80px; }
+  .send-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--surface); flex-shrink: 0; }
+  .send-bar .hint { font-size: 11px; color: var(--text-dimmer); flex: 1; }
+  .btn { padding: 8px 20px; border-radius: var(--radius); border: none; cursor: pointer; font-size: 13px; font-weight: 600; transition: all .15s; display: flex; align-items: center; gap: 6px; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-dim); }
+  .btn-ghost:hover { border-color: var(--text-dim); color: var(--text); }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+  .btn-save-config { background: var(--surface2); border: 1px dashed var(--border); color: var(--text-dim); border-radius: var(--radius); padding: 6px; cursor: pointer; font-size: 12px; transition: all .15s; }
+  .btn-save-config:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Right Panel (Response) ── */
+  .right-panel { width: 420px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
+  .resp-header { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .resp-header span { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; color: var(--text-dimmer); }
+  .resp-header .spacer { flex: 1; }
+  .meta-pill { font-size: 11px; padding: 2px 8px; border-radius: 20px; background: var(--surface2); color: var(--text-dim); font-family: var(--mono); }
+  .meta-pill.green { background: rgba(34,197,94,.1); color: var(--green); }
+  .meta-pill.red { background: rgba(239,68,68,.1); color: var(--red); }
+  .resp-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .resp-tab { padding: 8px 16px; font-size: 12px; cursor: pointer; color: var(--text-dim); border-bottom: 2px solid transparent; transition: all .15s; }
+  .resp-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .resp-body { flex: 1; overflow-y: auto; padding: 14px; }
+  .resp-text { line-height: 1.7; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
+  .resp-json { font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .resp-placeholder { color: var(--text-dimmer); font-size: 13px; text-align: center; margin-top: 40px; }
+
+  /* Streaming cursor */
+  .cursor { display: inline-block; width: 2px; height: 14px; background: var(--accent); animation: blink .8s infinite; vertical-align: text-bottom; margin-left: 1px; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* History */
+  .history-list { display: flex; flex-direction: column; gap: 4px; }
+  .hist-item { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; transition: all .15s; }
+  .hist-item:hover { border-color: var(--accent); }
+  .hist-meta { font-size: 11px; color: var(--text-dimmer); margin-bottom: 2px; }
+  .hist-preview { font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-dimmer); }
+
+  /* JSON highlighting */
+  .json-key { color: #79c0ff; }
+  .json-str { color: #a5d6ff; }
+  .json-num { color: #f2cc60; }
+  .json-bool { color: #ff7b72; }
+  .json-null { color: #ff7b72; }
+
+  /* Model preset chips */
+  .model-chip { font-size: 11px; padding: 3px 8px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; white-space: nowrap; transition: all .15s; background: var(--surface2); }
+  .model-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .model-chip.active { border-color: var(--accent); color: var(--accent); background: rgba(91,106,240,.15); }
+
+  /* Resizable panels hint */
+  .resize-handle { width: 4px; cursor: col-resize; background: transparent; transition: background .15s; flex-shrink: 0; }
+  .resize-handle:hover { background: var(--accent); }
+
+  .toggle-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .toggle-label { font-size: 12px; color: var(--text-dim); flex: 1; }
+  .toggle { position: relative; width: 32px; height: 18px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider { position: absolute; inset: 0; background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; cursor: pointer; transition: all .2s; }
+  .toggle-slider:before { content: ''; position: absolute; width: 12px; height: 12px; left: 2px; top: 2px; background: var(--text-dimmer); border-radius: 50%; transition: all .2s; }
+  .toggle input:checked + .toggle-slider { background: rgba(91,106,240,.3); border-color: var(--accent); }
+  .toggle input:checked + .toggle-slider:before { transform: translateX(14px); background: var(--accent); }
+
+  .error-block { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); border-radius: var(--radius); padding: 10px 12px; font-size: 12px; color: #fca5a5; font-family: var(--mono); white-space: pre-wrap; word-break: break-all; }
+
+  .scenario-list { display: flex; flex-direction: column; gap: 4px; }
+  .scenario-btn { text-align: left; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 12px; cursor: pointer; transition: all .15s; }
+  .scenario-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .spec-hint { font-size: 11px; color: var(--text-dimmer); line-height: 1.5; margin-top: 8px; padding: 8px; background: var(--surface2); border-radius: 6px; border: 1px dashed var(--border); }
+  .check-list { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+  .check-item { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); }
+  .check-item.pass { border-color: rgba(34,197,94,.35); }
+  .check-item.fail { border-color: rgba(239,68,68,.35); }
+  .check-item.warn { border-color: rgba(245,158,11,.35); }
+  .check-icon { flex-shrink: 0; font-weight: 700; width: 14px; }
+  .check-item.pass .check-icon { color: var(--green); }
+  .check-item.fail .check-icon { color: var(--red); }
+  .check-item.warn .check-icon { color: var(--yellow); }
+  .check-body { flex: 1; min-width: 0; }
+  .check-label { font-weight: 600; color: var(--text); }
+  .check-detail { color: var(--text-dim); margin-top: 2px; font-size: 11px; line-height: 1.45; }
+  .spec-ref { margin-top: 12px; padding: 10px; background: var(--surface2); border-radius: 6px; border: 1px solid var(--border); font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+  .spec-ref code { font-family: var(--mono); color: var(--accent); font-size: 10px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>中转站 API 兼容性检测</h1>
+  <span class="badge">OpenAI · Anthropic</span>
+  <div class="spacer"></div>
+  <div class="status-dot" id="status-dot"></div>
+  <span id="status-text">就绪</span>
+</header>
+
+<div class="layout">
+
+  <!-- ══ Left Panel ══ -->
+  <div class="left-panel">
+
+    <!-- Scenarios -->
+    <div class="panel-section">
+      <div class="section-title">测试场景</div>
+      <div class="scenario-list" id="scenario-list"></div>
+      <div class="spec-hint" id="spec-hint">选择场景或发送请求后，将对照官方常见字段做兼容性检查。</div>
+    </div>
+
+    <!-- Saved Configs -->
+    <div class="panel-section">
+      <div class="section-title">中转站配置</div>
+      <div class="config-list" id="config-list"></div>
+      <button class="btn-save-config" onclick="saveCurrentConfig()">＋ 保存当前配置</button>
+    </div>
+
+    <!-- Connection -->
+    <div class="panel-section">
+      <div class="section-title">连接</div>
+      <label>Base URL</label>
+      <input id="base-url" type="text" placeholder="https://api.openai.com" value="https://api.openai.com" />
+      <label>API Key</label>
+      <div class="input-row">
+        <input id="api-key" type="password" placeholder="sk-..." />
+        <button class="icon-btn" onclick="toggleKeyVisibility()" title="显示/隐藏">👁</button>
+      </div>
+      <label>Model</label>
+      <input id="model" type="text" placeholder="claude-sonnet-4-6" value="claude-sonnet-4-6" oninput="onModelInput()" />
+      <div id="model-presets" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px"></div>
+    </div>
+
+    <!-- Endpoint -->
+    <div class="panel-section">
+      <div class="section-title">接口端点</div>
+      <div class="endpoint-tabs" style="flex-wrap:wrap;gap:4px">
+        <div class="ep-tab active" data-ep="auto" onclick="setEndpoint('auto')" style="flex:1 1 100%">Auto 自动识别<br><span style="font-weight:400;font-size:10px" id="auto-hint">根据模型名自动选择接口</span></div>
+        <div class="ep-tab" data-ep="chat" onclick="setEndpoint('chat')">Chat<br><span style="font-weight:400;font-size:10px">/v1/chat/completions</span></div>
+        <div class="ep-tab" data-ep="responses" onclick="setEndpoint('responses')">Responses<br><span style="font-weight:400;font-size:10px">/v1/responses</span></div>
+        <div class="ep-tab" data-ep="anthropic" onclick="setEndpoint('anthropic')" style="flex:1 1 100%">Anthropic Messages<br><span style="font-weight:400;font-size:10px">/v1/messages · x-api-key</span></div>
+      </div>
+    </div>
+
+    <!-- Params -->
+    <div class="panel-section">
+      <div class="section-title">参数</div>
+      <div class="params-row">
+        <div class="param-group">
+          <label>Temperature</label>
+          <input id="temperature" type="number" step="0.1" min="0" max="2" value="0.7" />
+        </div>
+        <div class="param-group">
+          <label>Max Tokens</label>
+          <input id="max-tokens" type="number" step="256" min="1" value="2048" />
+        </div>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">流式输出 (Stream)</span>
+        <label class="toggle">
+          <input type="checkbox" id="stream-toggle" checked />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">服务端代理 <span style="color:var(--text-dimmer);font-size:10px">（绕过 CORS）</span></span>
+        <label class="toggle">
+          <input type="checkbox" id="proxy-toggle" checked />
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- History -->
+    <div class="panel-section" style="flex:1">
+      <div class="section-title" style="display:flex;align-items:center;justify-content:space-between">
+        历史记录
+        <span style="cursor:pointer;color:var(--text-dimmer);font-size:11px" onclick="clearHistory()">清空</span>
+      </div>
+      <div class="history-list" id="history-list">
+        <div style="color:var(--text-dimmer);font-size:12px">暂无记录</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ══ Center ══ -->
+  <div class="center">
+    <div class="msg-area">
+      <div class="msg-block">
+        <label>System Prompt <span style="color:var(--text-dimmer)">(可选)</span></label>
+        <textarea id="system-prompt" placeholder="你是一个有帮助的助手..."></textarea>
+      </div>
+      <div class="msg-block" style="flex:1;display:flex;flex-direction:column">
+        <label>User Message</label>
+        <textarea id="user-message" placeholder="在这里输入你的问题..." style="flex:1"></textarea>
+      </div>
+    </div>
+    <div class="send-bar">
+      <span class="hint">Ctrl+Enter 发送 · Tab 切换输入框</span>
+      <button class="btn btn-ghost btn-sm" onclick="clearAll()">清除</button>
+      <button class="btn btn-primary" id="send-btn" onclick="sendRequest()">
+        <span id="send-icon">▶</span> 发送
+      </button>
+    </div>
+  </div>
+
+  <!-- ══ Right Panel ══ -->
+  <div class="right-panel">
+    <div class="resp-header">
+      <span>响应</span>
+      <div class="spacer"></div>
+      <span class="meta-pill" id="resp-time" style="display:none"></span>
+      <span class="meta-pill" id="resp-tokens" style="display:none"></span>
+      <button class="icon-btn btn-sm" onclick="copyDiagnostics()" title="复制完整诊断信息（可粘贴给 Claude 分析）" style="font-size:11px;padding:5px 10px">⎘ 复制诊断</button>
+    </div>
+    <div class="resp-tabs">
+      <div class="resp-tab active" onclick="switchTab('text')" id="tab-text">文本</div>
+      <div class="resp-tab" onclick="switchTab('response')" id="tab-response">回复详情</div>
+      <div class="resp-tab" onclick="switchTab('request')" id="tab-request">请求详情</div>
+      <div class="resp-tab" onclick="switchTab('compliance')" id="tab-compliance">兼容性</div>
+    </div>
+    <div class="resp-body" id="resp-body">
+      <div class="resp-placeholder">发送请求后，响应将显示在此处</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ── Model Presets ──
+const MODEL_PRESETS = [
+  { label: 'Sonnet 4.6', value: 'claude-sonnet-4-6' },
+  { label: 'Opus 4.7',   value: 'claude-opus-4-7' },
+  { label: 'GPT-5.4',    value: 'gpt-5.4' },
+  { label: 'GPT-5.5',    value: 'gpt-5.5' },
+  { label: 'GPT-4o',     value: 'gpt-4o' },
+  { label: '4o-mini',    value: 'gpt-4o-mini' },
+  { label: 'o3',         value: 'o3' },
+  { label: 'DeepSeek',   value: 'deepseek-chat' },
+  { label: 'Gemini Pro', value: 'gemini-1.5-pro' },
+];
+
+function renderModelPresets() {
+  const current = document.getElementById('model').value;
+  document.getElementById('model-presets').innerHTML = MODEL_PRESETS.map(p => `
+    <span class="model-chip ${p.value === current ? 'active' : ''}" onclick="selectModel('${p.value}')">${p.label}</span>
+  `).join('');
+}
+
+function selectModel(val) {
+  document.getElementById('model').value = val;
+  renderModelPresets();
+  onModelInput();
+  autoSave();
+}
+
+function onModelInput() {
+  renderModelPresets();
+  if (currentEndpoint === 'auto') updateAutoHint();
+  updateSpecHint();
+  autoSave();
+}
+
+// ── Auto Endpoint Detection ──
+function detectEndpoint(model) {
+  if (!model) return 'chat';
+  const m = model.toLowerCase();
+  if (m.startsWith('claude')) return 'anthropic';
+  if (m.startsWith('gemini')) return 'responses';
+  if (m === 'gpt-5.4' || m === 'gpt-5.5') return 'responses';
+  return 'chat';
+}
+
+const EP_LABELS = { chat: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' };
+
+function updateAutoHint() {
+  const model = document.getElementById('model').value.trim();
+  const detected = detectEndpoint(model);
+  const hint = document.getElementById('auto-hint');
+  if (hint) hint.textContent = `→ ${EP_LABELS[detected]}`;
+}
+
+function formatHttpError(status, rawBody, requestUrl) {
+  let parsed = null;
+  try { parsed = JSON.parse(rawBody); } catch { /* plain text */ }
+  const e = parsed?.error ?? parsed;
+  const msg = e?.msg || e?.message || parsed?.message || rawBody?.slice(0, 500) || '未知错误';
+  let hint = '';
+  if (status === 404 && /route not found|not found/i.test(String(msg))) {
+    const model = document.getElementById('model').value.trim().toLowerCase();
+    if (requestUrl?.includes('/chat/completions')) {
+      hint = '。该中转站可能未实现 OpenAI Chat（/v1/chat/completions），请试「Responses」或查看站点文档';
+    } else if (model === 'gpt-5.4' || model === 'gpt-5.5' || model.startsWith('gemini')) {
+      hint = '。请改用「Responses」或「Auto」端点（/v1/responses）';
+    }
+  }
+  return `HTTP ${status}: ${msg}${hint}`;
+}
+
+function parseThrownHttpError(message) {
+  const m = /^HTTP (\d+):\s*([\s\S]*)$/.exec(message || '');
+  if (!m) return null;
+  return { status: Number(m[1]), body: m[2] };
+}
+
+// ── State ──
+let currentEndpoint = 'auto';
+let abortController = null;
+let history = JSON.parse(localStorage.getItem('api_test_history') || '[]');
+let savedConfigs = JSON.parse(localStorage.getItem('api_test_configs') || '[]');
+let activeTab = 'text';
+let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
+
+const SCENARIOS = [
+  { id: 'anthropic-stream', name: 'Anthropic · 流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: true, user: '用一句话回复：兼容性检测通过' },
+  { id: 'anthropic-sync', name: 'Anthropic · 非流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: false, user: '用一句话回复：兼容性检测通过' },
+  { id: 'chat-stream', name: 'OpenAI Chat · 流式', model: 'gpt-4o-mini', endpoint: 'chat', stream: true, user: '用一句话回复：兼容性检测通过' },
+  { id: 'responses-stream', name: 'OpenAI Responses · 流式', model: 'gpt-5.4', endpoint: 'responses', stream: true, user: '用一句话回复：兼容性检测通过' },
+];
+
+const SPEC_REFS = {
+  chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
+  responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
+  anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
+};
+let isStreaming = false;
+
+// ── Init ──
+(function restoreInputs() {
+  const saved = JSON.parse(localStorage.getItem('api_test_inputs') || '{}');
+  if (saved.baseUrl) document.getElementById('base-url').value = saved.baseUrl;
+  if (saved.apiKey) document.getElementById('api-key').value = saved.apiKey;
+  if (saved.model) document.getElementById('model').value = saved.model;
+  if (saved.systemPrompt) document.getElementById('system-prompt').value = saved.systemPrompt;
+  if (saved.temperature) document.getElementById('temperature').value = saved.temperature;
+  if (saved.maxTokens) document.getElementById('max-tokens').value = saved.maxTokens;
+  if (saved.stream !== undefined) document.getElementById('stream-toggle').checked = saved.stream;
+  if (saved.useProxy !== undefined) document.getElementById('proxy-toggle').checked = saved.useProxy;
+  if (saved.endpoint) {
+    const m = (saved.model || '').trim().toLowerCase();
+    if (saved.endpoint === 'chat' && (m === 'gpt-5.4' || m === 'gpt-5.5' || m.startsWith('gemini'))) {
+      setEndpoint('auto');
+    } else {
+      setEndpoint(saved.endpoint);
+    }
+  } else {
+    setEndpoint('auto');
+  }
+})();
+
+function autoSave() {
+  localStorage.setItem('api_test_inputs', JSON.stringify({
+    baseUrl: document.getElementById('base-url').value,
+    apiKey: document.getElementById('api-key').value,
+    model: document.getElementById('model').value,
+    systemPrompt: document.getElementById('system-prompt').value,
+    temperature: document.getElementById('temperature').value,
+    maxTokens: document.getElementById('max-tokens').value,
+    stream: document.getElementById('stream-toggle').checked,
+    useProxy: document.getElementById('proxy-toggle').checked,
+    endpoint: currentEndpoint,
+  }));
+}
+
+['base-url','api-key','model','system-prompt','temperature','max-tokens'].forEach(id => {
+  document.getElementById(id).addEventListener('input', autoSave);
+});
+document.getElementById('stream-toggle').addEventListener('change', autoSave);
+document.getElementById('proxy-toggle').addEventListener('change', autoSave);
+
+function shouldUseProxy(url) {
+  const el = document.getElementById('proxy-toggle');
+  if (!el?.checked) return false;
+  try {
+    return new URL(url).origin !== location.origin;
+  } catch {
+    return true;
+  }
+}
+
+async function readResponseJson(res) {
+  const raw = await res.text();
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`JSON 解析失败 (${res.status}): ${e.message}\n${raw.slice(0, 800)}`);
+  }
+}
+
+async function apiFetch(url, reqHeaders, body, signal) {
+  if (!shouldUseProxy(url)) {
+    return fetch(url, {
+      method: 'POST',
+      headers: reqHeaders,
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
+  return fetch('/api/proxy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, headers: reqHeaders, body }),
+    signal,
+  });
+}
+
+renderModelPresets();
+updateAutoHint();
+updateSpecHint();
+renderScenarios();
+renderConfigs();
+renderHistory();
+
+// Keyboard shortcut
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') sendRequest();
+});
+
+// ── Endpoint ──
+function setEndpoint(ep) {
+  currentEndpoint = ep;
+  document.querySelectorAll('.ep-tab').forEach(t => t.classList.toggle('active', t.dataset.ep === ep));
+  if (ep === 'auto') updateAutoHint();
+  updateSpecHint();
+  if (typeof autoSave === 'function') autoSave();
+}
+
+function getResolvedEndpoint() {
+  const model = document.getElementById('model').value.trim();
+  return currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
+}
+
+function updateSpecHint() {
+  const ep = getResolvedEndpoint();
+  const el = document.getElementById('spec-hint');
+  if (el) el.innerHTML = `<strong>官方常见形态</strong><br><code>${SPEC_REFS[ep] || ''}</code>`;
+}
+
+function renderScenarios() {
+  const el = document.getElementById('scenario-list');
+  if (!el) return;
+  el.innerHTML = SCENARIOS.map(s => `
+    <button type="button" class="scenario-btn" onclick="applyScenario('${s.id}')">${s.name}</button>
+  `).join('');
+}
+
+function applyScenario(id) {
+  const s = SCENARIOS.find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('model').value = s.model;
+  document.getElementById('stream-toggle').checked = s.stream;
+  document.getElementById('user-message').value = s.user;
+  setEndpoint(s.endpoint);
+  renderModelPresets();
+  autoSave();
+}
+
+// ── Key Visibility ──
+function toggleKeyVisibility() {
+  const el = document.getElementById('api-key');
+  el.type = el.type === 'password' ? 'text' : 'password';
+}
+
+// ── Configs ──
+function saveCurrentConfig() {
+  const name = prompt('为此配置命名：', document.getElementById('base-url').value.replace(/https?:\/\//, ''));
+  if (!name) return;
+  const cfg = {
+    id: Date.now(),
+    name,
+    baseUrl: document.getElementById('base-url').value,
+    apiKey: document.getElementById('api-key').value,
+    model: document.getElementById('model').value,
+    endpoint: currentEndpoint,
+  };
+  savedConfigs = savedConfigs.filter(c => c.name !== name);
+  savedConfigs.unshift(cfg);
+  if (savedConfigs.length > 20) savedConfigs.pop();
+  localStorage.setItem('api_test_configs', JSON.stringify(savedConfigs));
+  renderConfigs();
+}
+
+function loadConfig(cfg) {
+  document.getElementById('base-url').value = cfg.baseUrl || '';
+  document.getElementById('api-key').value = cfg.apiKey || '';
+  document.getElementById('model').value = cfg.model || '';
+  if (cfg.endpoint) setEndpoint(cfg.endpoint);
+  renderConfigs(cfg.id);
+}
+
+function deleteConfig(id, e) {
+  e.stopPropagation();
+  savedConfigs = savedConfigs.filter(c => c.id !== id);
+  localStorage.setItem('api_test_configs', JSON.stringify(savedConfigs));
+  renderConfigs();
+}
+
+function renderConfigs(activeId) {
+  const el = document.getElementById('config-list');
+  if (savedConfigs.length === 0) {
+    el.innerHTML = '<div style="color:var(--text-dimmer);font-size:12px">暂无保存的配置</div>';
+    return;
+  }
+  el.innerHTML = savedConfigs.map(c => `
+    <div class="config-item ${c.id === activeId ? 'active' : ''}" onclick="loadConfig(${JSON.stringify(c).replace(/"/g, '&quot;')})">
+      <span class="config-name" title="${c.name}">${c.name}</span>
+      <span class="config-del" onclick="deleteConfig(${c.id}, event)">×</span>
+    </div>
+  `).join('');
+}
+
+// ── Send ──
+async function sendRequest() {
+  if (isStreaming) { abortController?.abort(); return; }
+
+  const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
+  const apiKey = document.getElementById('api-key').value.trim();
+  const model = document.getElementById('model').value.trim();
+  const systemPrompt = document.getElementById('system-prompt').value.trim();
+  const userMsg = document.getElementById('user-message').value.trim();
+  const temperature = parseFloat(document.getElementById('temperature').value) || 0.7;
+  const maxTokens = parseInt(document.getElementById('max-tokens').value) || 2048;
+  const stream = document.getElementById('stream-toggle').checked;
+
+  if (!baseUrl) return alert('请填写 Base URL');
+  if (!apiKey) return alert('请填写 API Key');
+  if (!model) return alert('请填写 Model');
+  if (!userMsg) return alert('请填写 User Message');
+
+  setStatus('loading', '请求中...');
+  isStreaming = true;
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.innerHTML = '<span>■</span> 停止';
+  sendBtn.style.background = 'var(--red)';
+  document.getElementById('resp-time').style.display = 'none';
+  document.getElementById('resp-tokens').style.display = 'none';
+
+  abortController = new AbortController();
+  const startTime = Date.now();
+  lastResponse.httpStatus = null;
+  lastResponse.error = null;
+  lastResponse.responseHeaders = null;
+  lastResponse.contentType = null;
+
+  // Build request body
+  const resolvedEndpoint = currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
+  let url, body, reqHeaders;
+  if (resolvedEndpoint === 'chat') {
+    url = `${baseUrl}/v1/chat/completions`;
+    const messages = [];
+    if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+    messages.push({ role: 'user', content: userMsg });
+    body = { model, messages, temperature, max_tokens: maxTokens, stream };
+    reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  } else if (resolvedEndpoint === 'responses') {
+    url = `${baseUrl}/v1/responses`;
+    body = { model, input: userMsg, temperature, max_output_tokens: maxTokens, stream };
+    if (systemPrompt) body.instructions = systemPrompt;
+    reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  } else {
+    // Anthropic Messages API
+    url = `${baseUrl}/v1/messages`;
+    body = { model, max_tokens: maxTokens, messages: [{ role: 'user', content: userMsg }], temperature };
+    if (systemPrompt) body.system = systemPrompt;
+    if (stream) body.stream = true;
+    reqHeaders = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
+  }
+
+  const viaProxy = shouldUseProxy(url);
+  const requestDetail = {
+    url,
+    viaProxy,
+    endpointMode: currentEndpoint,
+    resolvedEndpoint,
+    method: 'POST',
+    headers: { ...reqHeaders, ...(reqHeaders['x-api-key'] ? { 'x-api-key': apiKey.slice(0,8)+'...' } : { 'Authorization': `Bearer ${apiKey.slice(0,8)}...` }) },
+    body,
+  };
+  lastResponse.request = requestDetail;
+
+  switchTab('text');
+  document.getElementById('resp-body').innerHTML = '<div class="resp-text" id="stream-text"><span class="cursor"></span></div>';
+
+  try {
+    const res = await apiFetch(url, reqHeaders, body, abortController.signal);
+
+    lastResponse.httpStatus = res.status;
+    lastResponse.contentType = res.headers.get('content-type');
+    lastResponse.responseHeaders = Object.fromEntries(res.headers.entries());
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(formatHttpError(res.status, errText, url));
+    }
+
+    let fullText = '';
+    let finalJson = null;
+    const streamEvents = [];
+
+    if (stream) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          // Anthropic SSE uses "event:" lines before "data:"
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const json = JSON.parse(data);
+            streamEvents.push(json);
+
+            const delta = json.choices?.[0]?.delta?.content;
+            if (delta) { fullText += delta; updateStreamText(fullText); }
+
+            if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
+              fullText += json.delta.text;
+              updateStreamText(fullText);
+            } else {
+              if (delta) { fullText += delta; updateStreamText(fullText); }
+              const outputDelta = json.output?.[0]?.content?.[0]?.text
+                || (json.delta?.text && json.delta?.type !== 'text_delta' ? json.delta.text : null);
+              if (outputDelta && !delta) { fullText += outputDelta; updateStreamText(fullText); }
+            }
+
+            if (json.type === 'message_start' && json.message) {
+              finalJson = { ...json.message, content: [{ type: 'text', text: '' }] };
+              const u = json.message.usage;
+              if (u) showTokens((u.input_tokens||0)+(u.output_tokens||0), u.input_tokens, u.output_tokens);
+            }
+            if (json.type === 'message_delta') {
+              if (json.delta?.stop_reason && finalJson) finalJson.stop_reason = json.delta.stop_reason;
+              if (json.usage && finalJson) {
+                finalJson.usage = { ...finalJson.usage, ...json.usage };
+                const inp = finalJson.usage?.input_tokens || 0;
+                showTokens(inp + json.usage.output_tokens, inp, json.usage.output_tokens);
+              }
+            }
+            if (json.type === 'response.output_text.delta' && json.delta) {
+              fullText += json.delta;
+              updateStreamText(fullText);
+            }
+            if (json.type === 'response.completed' && json.response) {
+              finalJson = json.response;
+              const u = json.response.usage;
+              if (u) showTokens(u.total_tokens || (u.input_tokens + u.output_tokens), u.input_tokens, u.output_tokens);
+            }
+            if (json.usage && json.choices && !json.type) {
+              if (!finalJson) finalJson = { choices: [{ message: { role: 'assistant', content: '' } }] };
+              finalJson.usage = json.usage;
+            }
+          } catch {}
+        }
+      }
+
+      if (finalJson?.content?.[0]?.type === 'text') {
+        finalJson.content[0].text = fullText;
+      } else if (finalJson?.choices?.[0]?.message) {
+        finalJson.choices[0].message.content = fullText;
+      } else if (fullText && !finalJson) {
+        finalJson = { choices: [{ message: { role: 'assistant', content: fullText } }] };
+      }
+
+      if (streamEvents.length) {
+        finalJson = {
+          format: 'server-sent_events',
+          eventCount: streamEvents.length,
+          assembled: finalJson,
+          events: streamEvents,
+        };
+      }
+    } else {
+      const json = await readResponseJson(res);
+      finalJson = json;
+      // Parse text — OpenAI / Anthropic / Responses
+      fullText = json.choices?.[0]?.message?.content
+        || json.content?.[0]?.text                        // Anthropic
+        || json.output?.[0]?.content?.[0]?.text
+        || json.output_text
+        || JSON.stringify(json, null, 2);
+
+      // Tokens
+      const usage = json.usage;
+      if (usage) {
+        const inp = usage.prompt_tokens || usage.input_tokens || 0;
+        const out = usage.completion_tokens || usage.output_tokens || 0;
+        showTokens(usage.total_tokens || (inp + out), inp, out);
+      }
+    }
+
+    const elapsed = Date.now() - startTime;
+    document.getElementById('resp-time').textContent = `${(elapsed/1000).toFixed(2)}s`;
+    document.getElementById('resp-time').style.display = '';
+    document.getElementById('resp-time').className = 'meta-pill green';
+
+    lastResponse.text = fullText;
+    lastResponse.json = finalJson;
+    lastResponse.elapsed = elapsed;
+    lastResponse.error = null;
+    lastResponse.responseDetail = buildResponseDetail();
+    lastResponse.compliance = runComplianceCheck();
+
+    showTab('text');
+    document.getElementById('resp-body').innerHTML = `<div class="resp-text">${escapeHtml(fullText)}</div>`;
+
+    setStatus('ok', `完成 · ${(elapsed/1000).toFixed(2)}s`);
+
+    addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'ok', answer: fullText.slice(0, 100) });
+
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    if (err.name === 'AbortError') {
+      setStatus('ok', '已停止');
+      if (lastResponse.text) {
+        document.getElementById('resp-body').innerHTML = `<div class="resp-text">${escapeHtml(lastResponse.text)}</div>`;
+      }
+    } else {
+      setStatus('err', '请求失败');
+      lastResponse.text = '';
+      const httpErr = parseThrownHttpError(errMsg);
+      if (httpErr) {
+        try { lastResponse.json = JSON.parse(httpErr.body); } catch { lastResponse.json = { error: httpErr.body }; }
+      } else {
+        lastResponse.json = { error: errMsg, name: err?.name || 'Error' };
+      }
+      lastResponse.error = errMsg;
+      if (!lastResponse.elapsed) lastResponse.elapsed = Date.now() - startTime;
+      lastResponse.responseDetail = buildResponseDetail();
+      lastResponse.compliance = runComplianceCheck();
+      switchTab('text');
+      document.getElementById('resp-body').innerHTML = `<div class="error-block">错误: ${escapeHtml(errMsg)}</div>`;
+      document.getElementById('resp-time').textContent = `失败`;
+      document.getElementById('resp-time').style.display = '';
+      document.getElementById('resp-time').className = 'meta-pill red';
+      addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'err', answer: errMsg.slice(0, 100) });
+    }
+  } finally {
+    isStreaming = false;
+    sendBtn.innerHTML = '<span>▶</span> 发送';
+    sendBtn.style.background = '';
+    abortController = null;
+  }
+}
+
+function updateStreamText(text) {
+  const el = document.getElementById('stream-text');
+  if (el) el.innerHTML = escapeHtml(text) + '<span class="cursor"></span>';
+}
+
+function showTokens(total, prompt, completion) {
+  const el = document.getElementById('resp-tokens');
+  el.textContent = `${total} tokens (↑${prompt||'?'} ↓${completion||'?'})`;
+  el.style.display = '';
+  el.className = 'meta-pill green';
+  lastResponse.tokens = { total, prompt, completion };
+}
+
+function getAssembledBody() {
+  const b = lastResponse.json;
+  if (!b) return null;
+  if (b.format === 'server-sent_events') return b.assembled;
+  return b;
+}
+
+function runComplianceCheck() {
+  const req = lastResponse.request || {};
+  const ep = req.resolvedEndpoint || getResolvedEndpoint();
+  const model = (req.body?.model || '').toLowerCase();
+  const stream = !!req.body?.stream;
+  const checks = [];
+
+  const add = (id, label, status, detail) => checks.push({ id, label, status, detail });
+
+  const expectPath = { chat: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' }[ep];
+  if (expectPath && req.url?.includes(expectPath)) {
+    add('path', '请求路径', 'pass', `${expectPath}`);
+  } else if (expectPath) {
+    add('path', '请求路径', 'fail', `期望含 ${expectPath}，实际 ${req.url || '未知'}`);
+  }
+
+  if (ep === 'anthropic') {
+    const h = req.headers || {};
+    if (h['x-api-key'] && h['anthropic-version']) add('auth', '鉴权头 (Anthropic)', 'pass', 'x-api-key + anthropic-version');
+    else add('auth', '鉴权头 (Anthropic)', 'fail', '缺少 x-api-key 或 anthropic-version');
+    if (req.body?.temperature != null) add('temp', 'temperature', 'pass', String(req.body.temperature));
+    else add('temp', 'temperature', 'warn', '未发送 temperature（官方支持）');
+  } else {
+    if (req.headers?.Authorization?.startsWith('Bearer')) add('auth', '鉴权头 (Bearer)', 'pass', 'Authorization: Bearer …');
+    else add('auth', '鉴权头 (Bearer)', 'fail', '缺少 Authorization: Bearer');
+  }
+
+  if (currentEndpoint !== 'auto' && currentEndpoint !== ep) {
+    add('endpoint-mode', '端点模式', 'warn', `手动选了 ${currentEndpoint}，按模型推荐应为 ${ep}`);
+  }
+
+  if (model.startsWith('gpt-5.') && ep === 'chat') {
+    add('model-route', '模型与路径', 'warn', `${model} 多数中转站应走 /v1/responses，当前为 chat`);
+  }
+
+  if (lastResponse.error) {
+    add('http', 'HTTP 响应', lastResponse.httpStatus && lastResponse.httpStatus < 400 ? 'warn' : 'fail',
+      lastResponse.httpStatus ? `HTTP ${lastResponse.httpStatus}` : '无状态码');
+    add('body', '响应体', 'fail', lastResponse.error.slice(0, 200));
+    if (lastResponse.httpStatus === 404 && req.url?.includes('/chat/completions') && /route not found/i.test(lastResponse.error)) {
+      add('relay-route', '中转站路由', 'fail', '未实现 /v1/chat/completions；可改测 Responses 或 Anthropic Messages');
+    }
+    return { endpoint: ep, checks, summary: { pass: checks.filter(c => c.status === 'pass').length, fail: checks.filter(c => c.status === 'fail').length, warn: checks.filter(c => c.status === 'warn').length } };
+  }
+
+  if (lastResponse.httpStatus === 200) add('http', 'HTTP 状态', 'pass', '200');
+  else add('http', 'HTTP 状态', 'fail', String(lastResponse.httpStatus ?? '未知'));
+
+  const assembled = getAssembledBody();
+  const events = lastResponse.json?.events;
+
+  if (stream && lastResponse.contentType?.includes('text/event-stream')) {
+    add('stream-ct', '流式 Content-Type', 'pass', lastResponse.contentType);
+  } else if (stream) {
+    add('stream-ct', '流式 Content-Type', 'warn', lastResponse.contentType || '非 event-stream');
+  }
+
+  if (ep === 'anthropic' && stream && events) {
+    const types = new Set(events.map(e => e.type));
+    ['message_start', 'content_block_delta', 'message_stop'].forEach(t => {
+      if (types.has(t)) add(`sse-${t}`, `SSE · ${t}`, 'pass', '已收到');
+      else add(`sse-${t}`, `SSE · ${t}`, 'fail', '未收到');
+    });
+    if (assembled?.stop_reason) add('stop', 'stop_reason', 'pass', assembled.stop_reason);
+    else add('stop', 'stop_reason', 'warn', 'assembled 中无 stop_reason');
+  }
+
+  const usage = assembled?.usage || lastResponse.tokens;
+  if (usage) add('usage', 'Token 用量', 'pass', JSON.stringify(usage).slice(0, 120));
+  else add('usage', 'Token 用量', 'warn', '响应中未见 usage');
+
+  if (lastResponse.text?.length) add('content', '回复正文', 'pass', `${lastResponse.text.length} 字符`);
+  else if (lastResponse.httpStatus === 200) add('content', '回复正文', 'fail', 'HTTP 200 但无文本');
+
+  if (assembled?.id) add('id', '消息 ID', 'pass', assembled.id);
+  else if (ep === 'anthropic' && lastResponse.httpStatus === 200) add('id', '消息 ID', 'warn', 'assembled 无 id');
+
+  const summary = {
+    pass: checks.filter(c => c.status === 'pass').length,
+    fail: checks.filter(c => c.status === 'fail').length,
+    warn: checks.filter(c => c.status === 'warn').length,
+  };
+  return { endpoint: ep, checks, summary };
+}
+
+function renderComplianceHtml(report) {
+  if (!report) return '<div class="resp-placeholder">发送请求后显示兼容性检查结果</div>';
+  const icons = { pass: '✓', fail: '✗', warn: '!' };
+  const items = report.checks.map(c => `
+    <div class="check-item ${c.status}">
+      <span class="check-icon">${icons[c.status]}</span>
+      <div class="check-body">
+        <div class="check-label">${escapeHtml(c.label)}</div>
+        <div class="check-detail">${escapeHtml(c.detail)}</div>
+      </div>
+    </div>
+  `).join('');
+  const s = report.summary;
+  return `
+    <div style="margin-bottom:10px;font-size:12px;color:var(--text-dim)">
+      端点：<strong style="color:var(--text)">${escapeHtml(report.endpoint)}</strong>
+      · <span style="color:var(--green)">通过 ${s.pass}</span>
+      · <span style="color:var(--red)">失败 ${s.fail}</span>
+      · <span style="color:var(--yellow)">警告 ${s.warn}</span>
+    </div>
+    <div class="check-list">${items}</div>
+    <div class="spec-ref"><strong>对照规范</strong><br><code>${escapeHtml(SPEC_REFS[report.endpoint] || '')}</code></div>
+  `;
+}
+
+/** 与「请求详情」对称：HTTP 元信息 + 接口返回的原始 body（JSON） */
+function buildResponseDetail() {
+  return {
+    httpStatus: lastResponse.httpStatus ?? null,
+    elapsedMs: lastResponse.elapsed ?? null,
+    contentType: lastResponse.contentType ?? null,
+    headers: lastResponse.responseHeaders ?? null,
+    body: lastResponse.json ?? null,
+    error: lastResponse.error ?? null,
+  };
+}
+
+// ── Tabs ──
+function switchTab(tab) {
+  activeTab = tab;
+  showTab(tab);
+}
+
+function showTab(tab) {
+  document.querySelectorAll('.resp-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(`tab-${tab}`)?.classList.add('active');
+  const body = document.getElementById('resp-body');
+  if (tab === 'text') {
+    body.innerHTML = lastResponse.text ? `<div class="resp-text">${escapeHtml(lastResponse.text)}</div>` : '<div class="resp-placeholder">发送请求后，响应将显示在此处</div>';
+  } else if (tab === 'response') {
+    const detail = buildResponseDetail();
+    lastResponse.responseDetail = detail;
+    body.innerHTML = (detail.httpStatus != null || detail.body || detail.error)
+      ? `<div class="resp-json">${highlightJson(JSON.stringify(detail, null, 2))}</div>`
+      : '<div class="resp-placeholder">暂无回复信息</div>';
+  } else if (tab === 'request') {
+    body.innerHTML = lastResponse.request ? `<div class="resp-json">${highlightJson(JSON.stringify(lastResponse.request, null, 2))}</div>` : '<div class="resp-placeholder">暂无请求信息</div>';
+  } else if (tab === 'compliance') {
+    if (!lastResponse.compliance && lastResponse.request) lastResponse.compliance = runComplianceCheck();
+    body.innerHTML = renderComplianceHtml(lastResponse.compliance);
+  }
+}
+
+// ── History ──
+function addHistory(item) {
+  history.unshift(item);
+  if (history.length > 30) history.pop();
+  localStorage.setItem('api_test_history', JSON.stringify(history));
+  renderHistory();
+}
+
+function renderHistory() {
+  const el = document.getElementById('history-list');
+  if (history.length === 0) {
+    el.innerHTML = '<div style="color:var(--text-dimmer);font-size:12px">暂无记录</div>';
+    return;
+  }
+  el.innerHTML = history.slice(0, 15).map((h, i) => `
+    <div class="hist-item" onclick="loadHistory(${i})">
+      <div class="hist-meta">
+        <span style="color:${h.status==='ok'?'var(--green)':'var(--red)'}">●</span>
+        ${h.time} · ${h.model}
+      </div>
+      <div class="hist-preview">Q: ${escapeHtml(h.question)}</div>
+      <div class="hist-preview" style="color:${h.status==='ok'?'var(--text-dim)':'var(--red)'};opacity:.8">${h.status==='ok'?'A: ':'✗ '}${escapeHtml(h.answer)}</div>
+    </div>
+  `).join('');
+}
+
+function loadHistory(i) {
+  const h = history[i];
+  document.getElementById('user-message').value = h.question;
+  lastResponse.text = h.answer;
+  showTab('text');
+}
+
+function clearHistory() {
+  history = [];
+  localStorage.removeItem('api_test_history');
+  renderHistory();
+}
+
+// ── Misc ──
+function clearAll() {
+  document.getElementById('user-message').value = '';
+  document.getElementById('system-prompt').value = '';
+  lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
+  document.getElementById('resp-body').innerHTML = '<div class="resp-placeholder">发送请求后，响应将显示在此处</div>';
+  document.getElementById('resp-time').style.display = 'none';
+  document.getElementById('resp-tokens').style.display = 'none';
+  setStatus('', '就绪');
+}
+
+function copyDiagnostics() {
+  const req = lastResponse.request || {};
+  const lines = [];
+
+  lines.push('## API 测试诊断报告');
+  lines.push(`时间: ${new Date().toLocaleString()}`);
+  lines.push('');
+
+  lines.push('### 请求配置');
+  lines.push(`- 接口: ${req.url || '未知'}`);
+  if (req.viaProxy) lines.push(`- 经服务端代理: 是（${location.origin}/api/proxy）`);
+  lines.push(`- 模型: ${req.body?.model || document.getElementById('model').value || '未知'}`);
+  if (req.endpointMode) lines.push(`- 端点模式: ${req.endpointMode}${req.resolvedEndpoint ? ` → ${req.resolvedEndpoint}` : ''}`);
+  lines.push(`- Stream: ${req.body?.stream === true ? 'true' : req.body?.stream === false ? 'false' : (req.resolvedEndpoint === 'anthropic' && !('stream' in (req.body || {})) ? 'false' : String(req.body?.stream ?? 'false'))}`);
+  lines.push(`- Temperature: ${req.body?.temperature ?? '未知'}`);
+  lines.push(`- Max Tokens: ${req.body?.max_tokens ?? req.body?.max_output_tokens ?? '未知'}`);
+
+  const userMsg = document.getElementById('user-message').value.trim();
+  const sysPrompt = document.getElementById('system-prompt').value.trim();
+  if (sysPrompt) {
+    lines.push('');
+    lines.push('### System Prompt');
+    lines.push(sysPrompt);
+  }
+  lines.push('');
+  lines.push('### User Message');
+  lines.push(userMsg || '(空)');
+  lines.push('');
+
+  if (lastResponse.responseDetail) {
+    lines.push('');
+    lines.push('### 回复详情');
+    lines.push('```json');
+    lines.push(JSON.stringify(lastResponse.responseDetail, null, 2));
+    lines.push('```');
+  }
+
+  if (lastResponse.compliance) {
+    lines.push('');
+    lines.push('### 兼容性检查');
+    const c = lastResponse.compliance;
+    lines.push(`端点: ${c.endpoint} · 通过 ${c.summary.pass} / 失败 ${c.summary.fail} / 警告 ${c.summary.warn}`);
+    c.checks.forEach(x => lines.push(`- [${x.status}] ${x.label}: ${x.detail}`));
+  }
+
+  lines.push('');
+  lines.push('### 响应结果');
+  if (lastResponse.error) {
+    lines.push(`状态: 失败`);
+    if (lastResponse.httpStatus) lines.push(`HTTP 状态码: ${lastResponse.httpStatus}`);
+    lines.push(`错误信息: ${lastResponse.error}`);
+  } else if (lastResponse.text) {
+    lines.push(`状态: 成功`);
+    if (lastResponse.httpStatus) lines.push(`HTTP 状态码: ${lastResponse.httpStatus}`);
+    if (lastResponse.elapsed) lines.push(`耗时: ${(lastResponse.elapsed/1000).toFixed(2)}s`);
+    if (lastResponse.tokens) {
+      const t = lastResponse.tokens;
+      lines.push(`Token 用量: 总计 ${t.total}（输入 ${t.prompt ?? '?'}，输出 ${t.completion ?? '?'}）`);
+    }
+    lines.push('');
+    lines.push('**回复内容:**');
+    lines.push(lastResponse.text);
+  } else {
+    lines.push('（尚未发送请求或无响应）');
+  }
+
+  const report = lines.join('\n');
+  navigator.clipboard.writeText(report).then(() => {
+    setStatus('ok', '诊断信息已复制，可直接粘贴给 Claude');
+    setTimeout(() => setStatus(lastResponse.error ? 'err' : 'ok', lastResponse.error ? '请求失败' : '完成'), 2500);
+  });
+}
+
+function setStatus(type, text) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot' + (type ? ' ' + type : '');
+  document.getElementById('status-text').textContent = text;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function highlightJson(str) {
+  return escapeHtml(str)
+    .replace(/(&quot;[^&]*&quot;)\s*:/g, '<span class="json-key">$1</span>:')
+    .replace(/:\s*(&quot;[^&]*&quot;)/g, ': <span class="json-str">$1</span>')
+    .replace(/:\s*(-?\d+\.?\d*)/g, ': <span class="json-num">$1</span>')
+    .replace(/:\s*(true|false)/g, ': <span class="json-bool">$1</span>')
+    .replace(/:\s*(null)/g, ': <span class="json-null">$1</span>');
+}
+</script>
+</body>
+</html>

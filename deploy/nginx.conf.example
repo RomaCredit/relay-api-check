@@ -1,0 +1,23 @@
+# Example: Nginx in front of static frontend + proxy backend
+# Adjust server_name and paths for your deployment.
+
+server {
+    listen 80;
+    server_name check.example.com;
+
+    root /var/www/relay-api-check/frontend;
+    index index.html;
+
+    location /api/proxy {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+        proxy_read_timeout 900s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
