@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta name="check-build" content="20260524-persist-v2">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1161,6 +1163,8 @@ async function sendRequest() {
   switchTab('text');
   document.getElementById('resp-body').innerHTML = '<div class="resp-text" id="stream-text"><span class="cursor"></span></div>';
 
+  let logOutcome = null;
+
   try {
     const res = await apiFetch(url, reqHeaders, body, abortController.signal);
 
@@ -1362,17 +1366,19 @@ async function sendRequest() {
 
     setStatus('ok', `完成 · ${(elapsed/1000).toFixed(2)}s`);
 
-    await persistCheckLogToServer(true);
+    logOutcome = true;
     addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'ok', answer: fullText.slice(0, 100) });
 
   } catch (err) {
     const errMsg = err?.message || String(err);
     if (err.name === 'AbortError') {
       setStatus('ok', '已停止');
+      logOutcome = false;
       if (lastResponse.text) {
         document.getElementById('resp-body').innerHTML = `<div class="resp-text">${escapeHtml(lastResponse.text)}</div>`;
       }
     } else {
+      logOutcome = false;
       setStatus('err', '请求失败');
       lastResponse.text = '';
       const httpErr = parseThrownHttpError(errMsg);
@@ -1408,7 +1414,6 @@ async function sendRequest() {
       document.getElementById('resp-time').textContent = `失败`;
       document.getElementById('resp-time').style.display = '';
       document.getElementById('resp-time').className = 'meta-pill red';
-      await persistCheckLogToServer(false);
       addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'err', answer: errMsg.slice(0, 100) });
     }
   } finally {
@@ -1416,6 +1421,11 @@ async function sendRequest() {
     sendBtn.innerHTML = '<span>▶</span> 发送';
     sendBtn.style.background = '';
     abortController = null;
+    if (logOutcome !== null && lastResponse.request) {
+      const saved = await persistCheckLogToServer(logOutcome);
+      const st = document.getElementById('status-text');
+      if (saved && st) st.textContent = `${st.textContent} · 已入库`;
+    }
   }
 }
 
@@ -1635,17 +1645,19 @@ function showTab(tab) {
 }
 
 // ── Persist to hub DB ──
-async function persistCheckLogToServer(overallOk) {
+async function persistCheckLogToServer(overallOk, attempt = 0) {
   try {
     const req = lastResponse.request;
-    if (!req) return;
+    if (!req) return false;
     const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
-    const resolved = req.resolvedEndpoint || 'chat';
-    if (!['chat', 'responses', 'anthropic'].includes(resolved)) return;
+    if (!baseUrl) return false;
+    let resolved = req.resolvedEndpoint || getResolvedEndpoint();
+    if (!['chat', 'responses', 'anthropic'].includes(resolved)) resolved = getResolvedEndpoint();
+    const modelName = (req.body && req.body.model) || document.getElementById('model').value || 'unknown';
     const payload = {
       baseUrl,
-      requestUrl: req.url,
-      model: (req.body && req.body.model) || document.getElementById('model').value || '',
+      requestUrl: String(req.url || baseUrl).slice(0, 2000),
+      model: modelName.slice(0, 120),
       endpointMode: req.endpointMode || currentEndpoint || 'auto',
       resolvedEndpoint: resolved,
       stream: !!(req.body && req.body.stream),
@@ -1658,7 +1670,7 @@ async function persistCheckLogToServer(overallOk) {
         title: lastResponse.diagnosis.title,
         summary: lastResponse.diagnosis.summary,
       } : null,
-      errorMessage: overallOk ? null : String(lastResponse.error || lastResponse.diagnosis?.summary || '').slice(0, 4000),
+      errorMessage: overallOk ? null : String(lastResponse.error || lastResponse.diagnosis?.summary || 'request failed').slice(0, 4000),
       compliance: lastResponse.compliance || null,
       responseSnippet: String(lastResponse.text || '').slice(0, 2000),
     };
@@ -1666,10 +1678,19 @@ async function persistCheckLogToServer(overallOk) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      keepalive: true,
     });
-    if (!res.ok) console.warn('[check] save log', res.status, await res.text().catch(() => ''));
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn('[check] save log', res.status, errText);
+      if (attempt < 1) return persistCheckLogToServer(overallOk, attempt + 1);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.warn('[check] save log failed', e);
+    if (attempt < 1) return persistCheckLogToServer(overallOk, attempt + 1);
+    return false;
   }
 }
 
