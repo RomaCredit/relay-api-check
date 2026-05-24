@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260524-persist-v2">
+<meta name="check-build" content="20260524-persist-v3">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1644,6 +1644,14 @@ function showTab(tab) {
   }
 }
 
+/** runComplianceCheck 返回 { endpoint, checks, summary }，入库只需 checks 数组 */
+function complianceChecksForIngest(compliance) {
+  if (!compliance) return null;
+  if (Array.isArray(compliance)) return compliance.slice(0, 40);
+  if (Array.isArray(compliance.checks)) return compliance.checks.slice(0, 40);
+  return null;
+}
+
 // ── Persist to hub DB ──
 async function persistCheckLogToServer(overallOk, attempt = 0) {
   try {
@@ -1671,7 +1679,7 @@ async function persistCheckLogToServer(overallOk, attempt = 0) {
         summary: lastResponse.diagnosis.summary,
       } : null,
       errorMessage: overallOk ? null : String(lastResponse.error || lastResponse.diagnosis?.summary || 'request failed').slice(0, 4000),
-      compliance: lastResponse.compliance || null,
+      compliance: complianceChecksForIngest(lastResponse.compliance),
       responseSnippet: String(lastResponse.text || '').slice(0, 2000),
     };
     const res = await fetch('/api/relay-api-check/ingest', {
