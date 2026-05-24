@@ -159,7 +159,13 @@
   .toggle input:checked + .toggle-slider { background: rgba(91,106,240,.3); border-color: var(--accent); }
   .toggle input:checked + .toggle-slider:before { transform: translateX(14px); background: var(--accent); }
 
-  .error-block { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); border-radius: var(--radius); padding: 10px 12px; font-size: 12px; color: #fca5a5; font-family: var(--mono); white-space: pre-wrap; word-break: break-all; }
+  .error-block { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); border-radius: var(--radius); padding: 10px 12px; font-size: 12px; color: #fca5a5; white-space: pre-wrap; word-break: break-word; }
+  .error-block .err-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; color: #fecaca; }
+  .error-block .err-summary { margin-bottom: 8px; line-height: 1.45; }
+  .error-block .err-hints { margin: 0; padding-left: 18px; line-height: 1.45; font-size: 12px; }
+  .error-block .err-raw { margin-top: 10px; font-family: var(--mono); font-size: 11px; opacity: .85; word-break: break-all; }
+  .check-item.diagnosis { border-color: rgba(96,165,250,.45); background: rgba(59,130,246,.08); }
+  .check-item.diagnosis .check-icon { color: #93c5fd; }
 
   .scenario-list { display: flex; flex-direction: column; gap: 4px; }
   .scenario-btn { text-align: left; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 12px; cursor: pointer; transition: all .15s; }
@@ -372,21 +378,471 @@ function updateAutoHint() {
   if (hint) hint.textContent = `→ ${EP_LABELS[detected]}`;
 }
 
-function formatHttpError(status, rawBody, requestUrl) {
+/** 解析 JSON 是否为真实模型回复（排除 New API 的 success:false、error 等） */
+function analyzeApiResponse(json) {
+  if (!json || typeof json !== 'object') {
+    return { ok: false, code: 'invalid_body', reason: '响应不是 JSON 对象' };
+  }
+  if (json.format === 'server-sent_events') {
+    const inner = json.assembled;
+    return inner ? analyzeApiResponse(inner) : { ok: false, code: 'no_assistant_content', reason: '流式响应未组装出正文' };
+  }
+
+  if (json.success === false) {
+    return {
+      ok: false,
+      code: 'relay_success_false',
+      reason: String(json.message || json.msg || 'success: false'),
+    };
+  }
+
+  if (json.error != null) {
+    const err = json.error;
+    const reason = typeof err === 'string' ? err : (err.message || err.type || JSON.stringify(err));
+    return { ok: false, code: 'api_error', reason: String(reason) };
+  }
+
+  const text =
+    json.choices?.[0]?.message?.content ??
+    json.content?.[0]?.text ??
+    json.output?.[0]?.content?.[0]?.text ??
+    json.output_text;
+
+  if (typeof text === 'string' && text.trim()) {
+    return { ok: true, text };
+  }
+
+  if (typeof json.message === 'string' && json.message && !json.choices && !json.content && !json.output && !json.id) {
+    return { ok: false, code: 'relay_message', reason: json.message };
+  }
+
+  return { ok: false, code: 'no_assistant_content', reason: '响应中无 choices / content / output 等模型回复字段' };
+}
+
+function responseLooksLikeJsonNotSse(contentType) {
+  const ct = (contentType || '').toLowerCase();
+  return ct.includes('application/json') && !ct.includes('text/event-stream');
+}
+
+function responseLooksLikeHtml(contentType, rawBody) {
+  const ct = (contentType || '').toLowerCase();
+  const body = String(rawBody || '');
+  return ct.includes('text/html') || /^\s*<!doctype/i.test(body) || /^\s*<html[\s>]/i.test(body);
+}
+
+async function failWithHtmlDiagnosis(status, rawBody, ctx) {
+  let diagnosis = diagnoseApiIssue({
+    status,
+    contentType: lastResponse.contentType || 'text/html',
+    rawBody: String(rawBody || '').slice(0, 8000),
+    requestUrl: ctx.url,
+    viaProxy: ctx.viaProxy,
+    baseUrl: ctx.baseUrl,
+    resolvedEndpoint: ctx.resolvedEndpoint,
+    stream: !!ctx.stream,
+  });
+  if (diagnosis?.needsProbe) {
+    diagnosis = await enrichDiagnosisWithApiProbe(diagnosis, ctx);
+  }
+  lastResponse.diagnosis = diagnosis;
+  const suggested = diagnosis?.hints?.find((h) => h.includes('建议 Base URL'));
+  const reason = suggested || diagnosis?.summary || '返回网页而非 API';
+  throwRelayApiFailure(status, { _type: 'html', preview: String(rawBody).slice(0, 400) }, {
+    ok: false,
+    code: 'html_not_api',
+    reason,
+  }, ctx);
+}
+
+/** 非 SSE 的 JSON 整包响应（含 stream:true 时上游仍返回 JSON 错误的情况） */
+async function consumeJsonApiResponse(res, ctx) {
+  const json = await readResponseJson(res);
+  const analysis = analyzeApiResponse(json);
+  if (!analysis.ok) {
+    throwRelayApiFailure(res.status, json, analysis, ctx);
+  }
+  const usage = json.usage;
+  if (usage) {
+    const inp = usage.prompt_tokens || usage.input_tokens || 0;
+    const out = usage.completion_tokens || usage.output_tokens || 0;
+    showTokens(usage.total_tokens || (inp + out), inp, out);
+  }
+  return { json, fullText: analysis.text };
+}
+
+function throwRelayApiFailure(status, json, analysis, ctx) {
+  const errBody = JSON.stringify(json, null, 2);
+  lastResponse.apiFailure = analysis;
+  lastResponse.json = json;
+  lastResponse.diagnosis = diagnoseApiIssue({
+    status,
+    contentType: lastResponse.contentType,
+    rawBody: errBody,
+    requestUrl: ctx.url,
+    viaProxy: ctx.viaProxy,
+    baseUrl: ctx.baseUrl,
+    resolvedEndpoint: ctx.resolvedEndpoint,
+  });
+  const detail = lastResponse.diagnosis?.title
+    ? `${lastResponse.diagnosis.title}：${analysis.reason}`
+    : analysis.reason;
+  throw new Error(`HTTP ${status}，接口未成功：${detail}`);
+}
+
+/** 根据 HTTP 状态、Content-Type、body 推断常见误配（HTML 当 API、/api 前缀、代理拦截等） */
+function diagnoseApiIssue(ctx) {
+  const {
+    status = null,
+    contentType = '',
+    rawBody = '',
+    requestUrl = '',
+    viaProxy = false,
+    baseUrl = '',
+    resolvedEndpoint = 'chat',
+    stream = false,
+    emptyBody = false,
+    jsonParseError = null,
+  } = ctx;
+
+  const ct = (contentType || '').toLowerCase();
+  const body = String(rawBody || '');
+  const url = requestUrl || '';
+  const base = (baseUrl || '').trim().replace(/\/$/, '');
+
+  let parsed = null;
+  try { parsed = JSON.parse(body); } catch { /* not json */ }
+
+  const detail = parsed?.detail;
+  const detailObj = detail && typeof detail === 'object' ? detail : null;
+  const detailStr = typeof detail === 'string' ? detail : (detailObj?.message || '');
+
+  if (status === 400 && viaProxy && (
+    detailObj?.code === 'proxy_path_not_allowed' ||
+    /路径须为|路径须以|proxy_path/i.test(detailStr + body)
+  )) {
+    return {
+      code: 'proxy_path_denied',
+      title: '检测代理未放行该 API 路径',
+      summary: detailObj?.hint || detailObj?.message || detailStr || '代理白名单不包含当前 URL 路径',
+      hints: [
+        detailObj?.allowed ? `允许的路径形态：${detailObj.allowed}` : null,
+        url ? `当前请求：${url}` : null,
+        '分组站（如 Right Code）Base URL 填 `https://域名/分组名`（如 /codex-pro），勿重复写 /v1。',
+        '若 API 在 /api/v1/...，Base URL 填 `https://域名/api`（勿写成 /api/v1）。',
+        '若路径正确仍报此错，请更新部署 api-check-proxy。',
+      ].filter(Boolean),
+    };
+  }
+
+  const looksHtml = ct.includes('text/html') || /^\s*<!doctype/i.test(body) || /^\s*<html[\s>]/i.test(body);
+  if (looksHtml && (status === 200 || status == null)) {
+    let pathOnly = '';
+    let host = '';
+    try {
+      const u = new URL(url);
+      pathOnly = u.pathname;
+      host = u.hostname;
+    } catch { /* ignore */ }
+    const hints = [
+      '当前响应是网站 HTML（前端 SPA/页面），不是 API 的 JSON 或 SSE。',
+      url ? `请求 URL：${url}` : null,
+      '将自动探测常见 API 路径以确认正确 Base URL（勿仅凭猜测）。',
+    ].filter(Boolean);
+    const known = KNOWN_RELAY_API_HOSTS[host];
+    if (known && known[resolvedEndpoint]) {
+      const k = known[resolvedEndpoint];
+      hints.push(`【站内已核实 · ${known.verified || ''}】${k.summary}`);
+    }
+    if (pathOnly.startsWith('/api/v1/') && base && !base.endsWith('/api')) {
+      hints.push('路径已是 /api/v1/...，请确认 Base URL 以 `/api` 结尾，且未重复拼接 /api。');
+    }
+    if (stream) hints.push('已开启流式，但上游未返回 text/event-stream，无法解析 data: 行。');
+    return {
+      code: 'html_not_api',
+      title: '返回网页而非 API',
+      summary: '未命中 API 端点（返回 HTML 文档）',
+      hints,
+      needsProbe: true,
+    };
+  }
+
+  const apiMsg = String(
+    parsed?.message ||
+    parsed?.error?.message ||
+    (typeof parsed?.error === 'string' ? parsed.error : '') ||
+    ''
+  );
+  if (status === 503 && /only allows Claude Code clients|Claude Code client/i.test(apiMsg + body)) {
+    return {
+      code: 'claude_code_only',
+      title: '分组仅允许 Claude Code 客户端',
+      summary: apiMsg || '当前分组不接受通用 Anthropic API',
+      hints: [
+        '该令牌分组仅支持官方 Claude Code 客户端，本工具无法在此验证。',
+        '请换「通用 API / Anthropic 协议」分组，或在本机用 claude CLI 配置 ANTHROPIC_BASE_URL 后测试。',
+      ],
+    };
+  }
+
+  if (status === 401 || status === 403 || /未登录|invalid.*api.*key|incorrect api key|unauthorized|authentication|invalid.*token/i.test(apiMsg + body)) {
+    const hints = [
+      '请在中转站控制台复制有效 API Key（通常为 sk- 开头），确认无多余空格或换行。',
+      resolvedEndpoint === 'anthropic'
+        ? 'Anthropic 端点使用 x-api-key 头，请确认 Key 类型与端点匹配。'
+        : 'OpenAI 形态使用 Authorization: Bearer。',
+    ];
+    let host = '';
+    try { host = new URL(url).hostname; } catch { /* ignore */ }
+    const onApiV1 = url.includes('/api/v1/');
+    if (/未登录/.test(apiMsg) && onApiV1) {
+      hints.unshift(
+        '当前 URL 在 /api/v1/*：多为站内会话接口，sk- API Key 通常不生效（与 /v1/responses 的 invalid API key 不同）。'
+      );
+      if (host === 'nekocode.ai') {
+        hints.push('NekoCode：API Key 请用 Base URL https://nekocode.ai + Responses（gpt-5.x）或 /v1/messages（Claude），勿用 /api 前缀测 Chat。');
+      }
+    } else if (/invalid.*api.*key|authentication_error/i.test(apiMsg + body)) {
+      hints.push('路径与 Key 形态匹配，请核对 Key 是否有效、未过期。');
+    }
+    const known = KNOWN_RELAY_API_HOSTS[host];
+    if (known?.[resolvedEndpoint]?.preferEndpoint === 'responses' && resolvedEndpoint === 'chat') {
+      hints.push(`建议将端点改为 Responses（${known.responses?.suggestedBase || ''}/v1/responses）。`);
+    }
+    return {
+      code: 'auth_failed',
+      title: onApiV1 && /未登录/.test(apiMsg) ? '鉴权失败（可能走错接口）' : '鉴权失败',
+      summary: apiMsg || `HTTP ${status || ''} — API Key 无效或未登录`.trim(),
+      hints,
+    };
+  }
+
+  if (jsonParseError && status === 200) {
+    const nested = diagnoseApiIssue({ ...ctx, rawBody: body.slice(0, 4000), jsonParseError: null });
+    if (nested) return nested;
+    return {
+      code: 'invalid_json',
+      title: '响应不是合法 JSON',
+      summary: jsonParseError,
+      hints: ['可能仍命中了网关 HTML 页、登录页或错误页，请查看「回复详情」中的 Content-Type 与前几百字节。'],
+    };
+  }
+
+  if (emptyBody && status === 200) {
+    if (stream && !ct.includes('text/event-stream')) {
+      const nested = diagnoseApiIssue({ ...ctx, contentType: ct || 'text/html', emptyBody: false });
+      if (nested) return nested;
+    }
+    return {
+      code: 'empty_body',
+      title: stream ? '流式响应无文本' : '响应无可用正文',
+      summary: stream ? '未从 SSE 中解析到 assistant 文本' : 'HTTP 200 但无 choices/content 字段',
+      hints: [
+        stream ? '确认上游支持 stream 且返回 text/event-stream。' : '查看「回复详情」确认 JSON 结构是否与端点一致。',
+        '若刚切换了 Base URL 或端点，请忽略上一次请求的 Token 用量（已在新请求开始时清空）。',
+      ],
+    };
+  }
+
+  if (status === 404 && /route not found|not found/i.test(apiMsg + body)) {
+    const model = document.getElementById('model').value.trim().toLowerCase();
+    const hints = [];
+    if (url.includes('/chat/completions')) {
+      hints.push('该中转站可能未实现 OpenAI Chat，请试「Responses」或「Anthropic Messages」。');
+    } else if (model === 'gpt-5.4' || model === 'gpt-5.5' || model.startsWith('gemini')) {
+      hints.push('GPT-5.x / Gemini 类模型多数应走 /v1/responses，请将端点改为 Responses 或 Auto。');
+    }
+    if (hints.length) {
+      return { code: 'route_not_found', title: '路由不存在 (404)', summary: apiMsg || 'route not found', hints };
+    }
+  }
+
+  return null;
+}
+
+/** Hub/线上实测过的站点 API 根路径（非猜测；探测失败时作对照） */
+const KNOWN_RELAY_API_HOSTS = {
+  'nekocode.ai': {
+    verified: '2026-05-23',
+    chat: {
+      summary: 'sk- API Key 勿测 /api/v1/chat/completions（会返回「未登录」，属站内会话接口）。gpt-5.x 请用根域 https://nekocode.ai + Responses；/v1/chat/completions 无 Key 时为前端页。',
+      suggestedBase: 'https://nekocode.ai',
+      preferEndpoint: 'responses',
+    },
+    anthropic: {
+      summary: 'Anthropic API Key：Base URL https://nekocode.ai，POST …/v1/messages（Bearer/x-api-key，错误为 authentication_error）。勿用 /api/v1/messages（「未登录」为站内接口）。',
+      suggestedBase: 'https://nekocode.ai',
+    },
+    responses: {
+      summary: 'API Key 推荐：Base URL https://nekocode.ai，POST …/v1/responses（支持 SSE）。与 /api/v1/* 站内接口不同。',
+      suggestedBase: 'https://nekocode.ai',
+    },
+  },
+};
+
+function classifyResponseKind(raw, contentType) {
+  const c = (contentType || '').toLowerCase();
+  const text = String(raw || '');
+  if (c.includes('text/html') || /^\s*<!doctype/i.test(text) || /^\s*<html[\s>]/i.test(text)) return 'website_html';
+  if (c.includes('text/event-stream')) return 'sse_api';
+  if (/^\s*[\[{]/.test(text)) return 'json_api';
+  return 'unknown';
+}
+
+function suggestBaseUrlFromApiUrl(apiUrl) {
+  try {
+    const u = new URL(apiUrl);
+    const p = u.pathname;
+    if (p.startsWith('/api/openai/v1/') || p.startsWith('/api/v1/')) return u.origin + '/api';
+    if (p.startsWith('/v1/')) return u.origin;
+  } catch { /* ignore */ }
+  return null;
+}
+
+function buildApiPathProbeCandidates(baseUrl, resolvedEndpoint, skipUrl) {
+  const base = (baseUrl || '').trim().replace(/\/$/, '');
+  const epPath = {
+    chat: '/v1/chat/completions',
+    responses: '/v1/responses',
+    anthropic: '/v1/messages',
+  }[resolvedEndpoint] || '/v1/chat/completions';
+
+  let origin = '';
+  let basePath = '';
+  try {
+    const u = new URL(base || 'https://invalid.local/');
+    origin = u.origin;
+    basePath = (u.pathname || '').replace(/\/$/, '');
+  } catch {
+    return [];
+  }
+
+  const candidates = [];
+  const seen = new Set();
+  const add = (url, reason) => {
+    if (!url || seen.has(url) || url === skipUrl) return;
+    seen.add(url);
+    candidates.push({ url, reason });
+  };
+
+  if (!basePath.endsWith('/api')) {
+    add(`${origin}/api${epPath}`, '根域 + /api' + epPath);
+  }
+  if (resolvedEndpoint === 'chat') {
+    add(`${origin}/api/openai/v1/chat/completions`, '/api/openai/v1/chat/completions');
+  }
+  if (resolvedEndpoint === 'anthropic' && basePath.endsWith('/api')) {
+    add(`${origin}${epPath}`, 'Anthropic 根路径（无 /api 前缀）');
+  }
+
+  return candidates.slice(0, 4);
+}
+
+async function probeApiPathCandidate(url, reqHeaders, body) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await apiFetch(url, reqHeaders, body, ctrl.signal);
+    const ct = res.headers.get('content-type') || '';
+    const raw = await res.text();
+    return {
+      url,
+      httpStatus: res.status,
+      contentType: ct,
+      kind: classifyResponseKind(raw, ct),
+      sample: raw.slice(0, 140),
+    };
+  } catch (e) {
+    return { url, kind: 'error', sample: String(e.message || e).slice(0, 140) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runApiPathProbes({ baseUrl, resolvedEndpoint, reqHeaders, body, skipUrl }) {
+  const candidates = buildApiPathProbeCandidates(baseUrl, resolvedEndpoint, skipUrl);
+  const results = [];
+  for (const c of candidates) {
+    const r = await probeApiPathCandidate(c.url, reqHeaders, body);
+    r.reason = c.reason;
+    results.push(r);
+    if (r.kind === 'json_api' || r.kind === 'sse_api') break;
+  }
+  return results;
+}
+
+function applyProbeResultsToDiagnosis(diagnosis, probeResults) {
+  if (!diagnosis) return diagnosis;
+  const hints = [...(diagnosis.hints || [])].filter(h => !h.includes('将自动探测'));
+  const apiHits = (probeResults || []).filter(r => r.kind === 'json_api' || r.kind === 'sse_api');
+
+  if (apiHits.length) {
+    const best = apiHits[0];
+    const suggested = suggestBaseUrlFromApiUrl(best.url);
+    const sample = best.sample?.replace(/\s+/g, ' ') || '';
+    const isSessionOnlyApi = /未登录/.test(sample) && best.url.includes('/api/v1/');
+    hints.unshift(
+      `【探测确认】${best.url} 返回 JSON（HTTP ${best.httpStatus}）` +
+      (sample ? `，片段：${sample.slice(0, 80)}` : '') +
+      (isSessionOnlyApi ? '（站内会话接口，sk- Key 可能不适用）' : '')
+    );
+    if (suggested && !isSessionOnlyApi) hints.unshift(`【建议 Base URL】${suggested}`);
+    else if (isSessionOnlyApi) {
+      hints.unshift('【说明】/api/v1/* 有 JSON 响应但「未登录」时，API Key 请改测根路径 /v1/responses 或 /v1/messages');
+    }
+  } else if (probeResults?.length) {
+    hints.push('【探测结果】下列备选路径均未返回 API JSON/SSE：');
+    probeResults.forEach(r => {
+      const label = r.kind === 'website_html' ? '仍是网页 HTML' : (r.kind === 'error' ? '请求失败' : r.kind);
+      hints.push(`  · ${r.url} → ${label}${r.httpStatus != null ? ` (HTTP ${r.httpStatus})` : ''}`);
+    });
+    hints.push('请在中转站控制台或文档核对「API Base URL」，不能假定一定是 /api。');
+  }
+
+  return { ...diagnosis, hints, apiProbe: probeResults };
+}
+
+async function enrichDiagnosisWithApiProbe(diagnosis, ctx) {
+  if (!diagnosis?.needsProbe && diagnosis?.code !== 'html_not_api') return diagnosis;
+  const probes = await runApiPathProbes(ctx);
+  return applyProbeResultsToDiagnosis(diagnosis, probes);
+}
+
+function formatHttpError(status, rawBody, requestUrl, viaProxy) {
+  const baseUrl = document.getElementById('base-url').value.trim();
+  const diagnosis = diagnoseApiIssue({
+    status,
+    rawBody,
+    requestUrl,
+    viaProxy,
+    baseUrl,
+    resolvedEndpoint: getResolvedEndpoint(),
+  });
+  if (diagnosis) {
+    lastResponse.diagnosis = diagnosis;
+    const hintBlock = diagnosis.hints.length ? '\n' + diagnosis.hints.map(h => '• ' + h).join('\n') : '';
+    return `${diagnosis.title} (HTTP ${status})\n${diagnosis.summary}${hintBlock}`;
+  }
+
   let parsed = null;
   try { parsed = JSON.parse(rawBody); } catch { /* plain text */ }
   const e = parsed?.error ?? parsed;
-  const msg = e?.msg || e?.message || parsed?.message || rawBody?.slice(0, 500) || '未知错误';
-  let hint = '';
-  if (status === 404 && /route not found|not found/i.test(String(msg))) {
-    const model = document.getElementById('model').value.trim().toLowerCase();
-    if (requestUrl?.includes('/chat/completions')) {
-      hint = '。该中转站可能未实现 OpenAI Chat（/v1/chat/completions），请试「Responses」或查看站点文档';
-    } else if (model === 'gpt-5.4' || model === 'gpt-5.5' || model.startsWith('gemini')) {
-      hint = '。请改用「Responses」或「Auto」端点（/v1/responses）';
-    }
+  const detail = parsed?.detail;
+  const msg = (typeof detail === 'object' ? detail?.message : detail)
+    || e?.msg || e?.message || parsed?.message || rawBody?.slice(0, 500) || '未知错误';
+  return `HTTP ${status}: ${msg}`;
+}
+
+function renderErrorBlock(errMsg, diagnosis) {
+  const d = diagnosis || lastResponse.diagnosis;
+  if (d) {
+    return `<div class="error-block">
+      <div class="err-title">${escapeHtml(d.title)}</div>
+      <div class="err-summary">${escapeHtml(d.summary)}</div>
+      ${d.hints?.length ? `<ul class="err-hints">${d.hints.map(h => `<li>${escapeHtml(h)}</li>`).join('')}</ul>` : ''}
+      ${errMsg ? `<div class="err-raw">原始: ${escapeHtml(errMsg)}</div>` : ''}
+    </div>`;
   }
-  return `HTTP ${status}: ${msg}${hint}`;
+  return `<div class="error-block">错误: ${escapeHtml(errMsg)}</div>`;
 }
 
 function parseThrownHttpError(message) {
@@ -401,7 +857,7 @@ let abortController = null;
 let history = JSON.parse(localStorage.getItem('api_test_history') || '[]');
 let savedConfigs = JSON.parse(localStorage.getItem('api_test_configs') || '[]');
 let activeTab = 'text';
-let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
+let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
 
 const SCENARIOS = [
   { id: 'anthropic-stream', name: 'Anthropic · 流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: true, user: '用一句话回复：兼容性检测通过' },
@@ -471,10 +927,41 @@ function shouldUseProxy(url) {
 }
 
 async function readResponseJson(res) {
+  const ct = res.headers.get('content-type') || '';
   const raw = await res.text();
+  const diagnosis = diagnoseApiIssue({
+    status: res.status,
+    contentType: ct,
+    rawBody: raw.slice(0, 4000),
+    requestUrl: lastResponse.request?.url,
+    viaProxy: lastResponse.request?.viaProxy,
+    baseUrl: document.getElementById('base-url').value.trim(),
+    resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
+    jsonParseError: null,
+  });
+  if (diagnosis?.code === 'html_not_api') {
+    lastResponse.diagnosis = diagnosis;
+    const hintBlock = diagnosis.hints.map(h => '• ' + h).join('\n');
+    throw new Error(`${diagnosis.title}\n${diagnosis.summary}\n${hintBlock}`);
+  }
   try {
     return JSON.parse(raw);
   } catch (e) {
+    const d2 = diagnoseApiIssue({
+      status: res.status,
+      contentType: ct,
+      rawBody: raw.slice(0, 4000),
+      requestUrl: lastResponse.request?.url,
+      viaProxy: lastResponse.request?.viaProxy,
+      baseUrl: document.getElementById('base-url').value.trim(),
+      resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
+      jsonParseError: e.message,
+    });
+    if (d2) {
+      lastResponse.diagnosis = d2;
+      const hintBlock = d2.hints.map(h => '• ' + h).join('\n');
+      throw new Error(`${d2.title}\n${d2.summary}\n${hintBlock}`);
+    }
     throw new Error(`JSON 解析失败 (${res.status}): ${e.message}\n${raw.slice(0, 800)}`);
   }
 }
@@ -618,13 +1105,22 @@ async function sendRequest() {
   sendBtn.style.background = 'var(--red)';
   document.getElementById('resp-time').style.display = 'none';
   document.getElementById('resp-tokens').style.display = 'none';
+  lastResponse.tokens = null;
 
   abortController = new AbortController();
   const startTime = Date.now();
+  lastResponse.text = '';
+  lastResponse.json = null;
+  lastResponse.compliance = null;
+  lastResponse.responseDetail = null;
   lastResponse.httpStatus = null;
   lastResponse.error = null;
+  lastResponse.diagnosis = null;
+  lastResponse.apiFailure = null;
+  lastResponse.streamJsonFallback = false;
   lastResponse.responseHeaders = null;
   lastResponse.contentType = null;
+  lastResponse.elapsed = null;
 
   // Build request body
   const resolvedEndpoint = currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
@@ -673,7 +1169,7 @@ async function sendRequest() {
     lastResponse.responseHeaders = Object.fromEntries(res.headers.entries());
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error(formatHttpError(res.status, errText, url));
+      throw new Error(formatHttpError(res.status, errText, url, viaProxy));
     }
 
     let fullText = '';
@@ -681,6 +1177,16 @@ async function sendRequest() {
     const streamEvents = [];
 
     if (stream) {
+      const streamCtx = { url, viaProxy, baseUrl, resolvedEndpoint, stream: true, skipUrl: url };
+      // 部分中转站（如 NekoCode 未登录）在 stream:true 时仍返回 application/json 整包，而非 SSE
+      if (responseLooksLikeJsonNotSse(lastResponse.contentType)) {
+        const handled = await consumeJsonApiResponse(res, streamCtx);
+        finalJson = handled.json;
+        fullText = handled.fullText;
+        lastResponse.streamJsonFallback = true;
+      } else if (responseLooksLikeHtml(lastResponse.contentType)) {
+        await failWithHtmlDiagnosis(res.status, await res.text(), streamCtx);
+      } else {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -701,17 +1207,32 @@ async function sendRequest() {
             const json = JSON.parse(data);
             streamEvents.push(json);
 
-            const delta = json.choices?.[0]?.delta?.content;
-            if (delta) { fullText += delta; updateStreamText(fullText); }
+            if (json.success === false || json.error) {
+              const fail = analyzeApiResponse(json);
+              if (!fail.ok) {
+                throwRelayApiFailure(lastResponse.httpStatus || res.status, json, fail, {
+                  url, viaProxy, baseUrl, resolvedEndpoint,
+                });
+              }
+            }
+
+            const choiceDelta = json.choices?.[0]?.delta;
+            // 仅拼接对用户可见的正文；reasoning_content 不写入（部分中转站 Claude 会分轨推送）
+            if (choiceDelta?.content) {
+              fullText += choiceDelta.content;
+              updateStreamText(fullText);
+            }
 
             if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
               fullText += json.delta.text;
               updateStreamText(fullText);
-            } else {
-              if (delta) { fullText += delta; updateStreamText(fullText); }
-              const outputDelta = json.output?.[0]?.content?.[0]?.text
-                || (json.delta?.text && json.delta?.type !== 'text_delta' ? json.delta.text : null);
-              if (outputDelta && !delta) { fullText += outputDelta; updateStreamText(fullText); }
+            }
+
+            const outputDelta = json.output?.[0]?.content?.[0]?.text
+              || (json.delta?.text && json.delta?.type !== 'text_delta' ? json.delta.text : null);
+            if (outputDelta) {
+              fullText += outputDelta;
+              updateStreamText(fullText);
             }
 
             if (json.type === 'message_start' && json.message) {
@@ -760,29 +1281,74 @@ async function sendRequest() {
           events: streamEvents,
         };
       }
-    } else {
-      const json = await readResponseJson(res);
-      finalJson = json;
-      // Parse text — OpenAI / Anthropic / Responses
-      fullText = json.choices?.[0]?.message?.content
-        || json.content?.[0]?.text                        // Anthropic
-        || json.output?.[0]?.content?.[0]?.text
-        || json.output_text
-        || JSON.stringify(json, null, 2);
-
-      // Tokens
-      const usage = json.usage;
-      if (usage) {
-        const inp = usage.prompt_tokens || usage.input_tokens || 0;
-        const out = usage.completion_tokens || usage.output_tokens || 0;
-        showTokens(usage.total_tokens || (inp + out), inp, out);
+      if (!streamEvents.length && buffer.trim()) {
+        try {
+          const json = JSON.parse(buffer.trim());
+          const fail = analyzeApiResponse(json);
+          if (!fail.ok) {
+            throwRelayApiFailure(res.status, json, fail, {
+              url, viaProxy, baseUrl, resolvedEndpoint,
+            });
+          }
+        } catch (e) {
+          if (String(e?.message || e).includes('接口未成功')) throw e;
+        }
       }
+
+      if (!fullText.trim()) {
+        if (responseLooksLikeHtml(lastResponse.contentType, buffer)) {
+          await failWithHtmlDiagnosis(res.status, buffer, streamCtx);
+        }
+        const streamAnalysis = analyzeApiResponse(finalJson);
+        if (!streamAnalysis.ok) {
+          throwRelayApiFailure(res.status, finalJson ?? { raw: buffer.slice(0, 500) }, streamAnalysis, {
+            url, viaProxy, baseUrl, resolvedEndpoint,
+          });
+        }
+        if (streamAnalysis.text) fullText = streamAnalysis.text;
+      }
+      } // end SSE branch
+    } else {
+      const handled = await consumeJsonApiResponse(res, {
+        url, viaProxy, baseUrl, resolvedEndpoint,
+      });
+      finalJson = handled.json;
+      fullText = handled.fullText;
     }
 
     const elapsed = Date.now() - startTime;
     document.getElementById('resp-time').textContent = `${(elapsed/1000).toFixed(2)}s`;
     document.getElementById('resp-time').style.display = '';
     document.getElementById('resp-time').className = 'meta-pill green';
+
+    if (!fullText && lastResponse.httpStatus === 200) {
+      lastResponse.diagnosis = diagnoseApiIssue({
+        status: lastResponse.httpStatus,
+        contentType: lastResponse.contentType,
+        requestUrl: url,
+        viaProxy,
+        baseUrl,
+        resolvedEndpoint,
+        stream,
+        emptyBody: true,
+      });
+    } else if (lastResponse.contentType?.includes('text/html')) {
+      lastResponse.diagnosis = diagnoseApiIssue({
+        status: lastResponse.httpStatus,
+        contentType: lastResponse.contentType,
+        requestUrl: url,
+        viaProxy,
+        baseUrl,
+        resolvedEndpoint,
+        stream,
+      });
+    }
+    if (lastResponse.diagnosis?.needsProbe || lastResponse.diagnosis?.code === 'html_not_api') {
+      setStatus('loading', '探测 API 路径…');
+      lastResponse.diagnosis = await enrichDiagnosisWithApiProbe(lastResponse.diagnosis, {
+        baseUrl, resolvedEndpoint, reqHeaders, body, skipUrl: url,
+      });
+    }
 
     lastResponse.text = fullText;
     lastResponse.json = finalJson;
@@ -796,6 +1362,7 @@ async function sendRequest() {
 
     setStatus('ok', `完成 · ${(elapsed/1000).toFixed(2)}s`);
 
+    await persistCheckLogToServer(true);
     addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'ok', answer: fullText.slice(0, 100) });
 
   } catch (err) {
@@ -809,20 +1376,39 @@ async function sendRequest() {
       setStatus('err', '请求失败');
       lastResponse.text = '';
       const httpErr = parseThrownHttpError(errMsg);
-      if (httpErr) {
-        try { lastResponse.json = JSON.parse(httpErr.body); } catch { lastResponse.json = { error: httpErr.body }; }
-      } else {
-        lastResponse.json = { error: errMsg, name: err?.name || 'Error' };
+      if (!lastResponse.apiFailure) {
+        if (httpErr) {
+          try { lastResponse.json = JSON.parse(httpErr.body); } catch { lastResponse.json = { error: httpErr.body }; }
+        } else {
+          lastResponse.json = { error: errMsg, name: err?.name || 'Error' };
+        }
       }
       lastResponse.error = errMsg;
+      if (!lastResponse.diagnosis) {
+        lastResponse.diagnosis = diagnoseApiIssue({
+          status: httpErr?.status ?? lastResponse.httpStatus,
+          rawBody: httpErr?.body || errMsg,
+          requestUrl: url,
+          viaProxy,
+          baseUrl,
+          resolvedEndpoint,
+        });
+      }
+      if (lastResponse.diagnosis?.needsProbe || lastResponse.diagnosis?.code === 'html_not_api') {
+        setStatus('loading', '探测 API 路径…');
+        lastResponse.diagnosis = await enrichDiagnosisWithApiProbe(lastResponse.diagnosis, {
+          baseUrl, resolvedEndpoint, reqHeaders, body, skipUrl: url,
+        });
+      }
       if (!lastResponse.elapsed) lastResponse.elapsed = Date.now() - startTime;
       lastResponse.responseDetail = buildResponseDetail();
       lastResponse.compliance = runComplianceCheck();
       switchTab('text');
-      document.getElementById('resp-body').innerHTML = `<div class="error-block">错误: ${escapeHtml(errMsg)}</div>`;
+      document.getElementById('resp-body').innerHTML = renderErrorBlock(errMsg, lastResponse.diagnosis);
       document.getElementById('resp-time').textContent = `失败`;
       document.getElementById('resp-time').style.display = '';
       document.getElementById('resp-time').className = 'meta-pill red';
+      await persistCheckLogToServer(false);
       addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'err', answer: errMsg.slice(0, 100) });
     }
   } finally {
@@ -862,11 +1448,36 @@ function runComplianceCheck() {
 
   const add = (id, label, status, detail) => checks.push({ id, label, status, detail });
 
-  const expectPath = { chat: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' }[ep];
-  if (expectPath && req.url?.includes(expectPath)) {
-    add('path', '请求路径', 'pass', `${expectPath}`);
-  } else if (expectPath) {
-    add('path', '请求路径', 'fail', `期望含 ${expectPath}，实际 ${req.url || '未知'}`);
+  const pathSuffix = {
+    chat: '/v1/chat/completions',
+    responses: '/v1/responses',
+    anthropic: '/v1/messages',
+  }[ep];
+  let matchedPath = null;
+  if (pathSuffix && req.url) {
+    try {
+      const p = new URL(req.url).pathname.replace(/\/$/, '');
+      if (p.endsWith(pathSuffix) || p.includes(pathSuffix)) matchedPath = pathSuffix;
+    } catch { /* ignore */ }
+  }
+  if (matchedPath) {
+    add('path', '请求路径', 'pass', matchedPath);
+    try {
+      const pathOnly = new URL(req.url).pathname;
+      const base = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
+      if (pathOnly.startsWith('/api/v1/') && base && !base.endsWith('/api')) {
+        add('base-url', 'Base URL', 'warn', `路径含 /api/v1，建议 Base URL 以 /api 结尾（当前: ${base}）`);
+      }
+    } catch { /* ignore */ }
+  } else if (pathSuffix) {
+    add('path', '请求路径', 'fail', `期望路径含 ${pathSuffix}，实际 ${req.url || '未知'}`);
+  }
+
+  if (lastResponse.diagnosis) {
+    const d = lastResponse.diagnosis;
+    const diagFail = d.code === 'html_not_api' || d.code === 'proxy_path_denied' || d.code === 'auth_failed' || d.code === 'claude_code_only';
+    add('diagnosis', '诊断建议', diagFail ? 'fail' : 'warn',
+      [d.summary, ...(d.hints || [])].join(' · '));
   }
 
   if (ep === 'anthropic') {
@@ -885,13 +1496,28 @@ function runComplianceCheck() {
   }
 
   if (model.startsWith('gpt-5.') && ep === 'chat') {
-    add('model-route', '模型与路径', 'warn', `${model} 多数中转站应走 /v1/responses，当前为 chat`);
+    let detail = `${model} 多数中转站应走 /v1/responses，当前为 chat`;
+    try {
+      const host = new URL(req.url || '').hostname;
+      if (host === 'nekocode.ai') {
+        detail += '；NekoCode 上 Responses 用 Base URL https://nekocode.ai，Chat 须用 https://nekocode.ai/api';
+      }
+    } catch { /* ignore */ }
+    add('model-route', '模型与路径', 'warn', detail);
   }
 
   if (lastResponse.error) {
     add('http', 'HTTP 响应', lastResponse.httpStatus && lastResponse.httpStatus < 400 ? 'warn' : 'fail',
       lastResponse.httpStatus ? `HTTP ${lastResponse.httpStatus}` : '无状态码');
-    add('body', '响应体', 'fail', lastResponse.error.slice(0, 200));
+    if (lastResponse.apiFailure) {
+      add('api-result', '接口业务结果', 'fail', lastResponse.apiFailure.reason);
+      if (/未登录|invalid.*api.*key|unauthorized|authentication/i.test(lastResponse.apiFailure.reason)) {
+        add('auth', ep === 'anthropic' ? '鉴权 (API Key)' : '鉴权 (Bearer)', 'fail',
+          'Key 无效或未登录（HTTP 可能仍为 200）');
+      }
+    }
+    const bodyDetail = lastResponse.diagnosis?.title || lastResponse.apiFailure?.reason || lastResponse.error.slice(0, 200);
+    add('body', '响应体', 'fail', bodyDetail);
     if (lastResponse.httpStatus === 404 && req.url?.includes('/chat/completions') && /route not found/i.test(lastResponse.error)) {
       add('relay-route', '中转站路由', 'fail', '未实现 /v1/chat/completions；可改测 Responses 或 Anthropic Messages');
     }
@@ -904,7 +1530,10 @@ function runComplianceCheck() {
   const assembled = getAssembledBody();
   const events = lastResponse.json?.events;
 
-  if (stream && lastResponse.contentType?.includes('text/event-stream')) {
+  if (stream && lastResponse.streamJsonFallback) {
+    add('stream-mode', '流式响应', 'warn',
+      '已请求 stream，但上游返回 application/json 整包（非 SSE）；已按 JSON 解析');
+  } else if (stream && lastResponse.contentType?.includes('text/event-stream')) {
     add('stream-ct', '流式 Content-Type', 'pass', lastResponse.contentType);
   } else if (stream) {
     add('stream-ct', '流式 Content-Type', 'warn', lastResponse.contentType || '非 event-stream');
@@ -920,12 +1549,16 @@ function runComplianceCheck() {
     else add('stop', 'stop_reason', 'warn', 'assembled 中无 stop_reason');
   }
 
-  const usage = assembled?.usage || lastResponse.tokens;
+  const usage = assembled?.usage || (lastResponse.diagnosis ? null : lastResponse.tokens);
   if (usage) add('usage', 'Token 用量', 'pass', JSON.stringify(usage).slice(0, 120));
   else add('usage', 'Token 用量', 'warn', '响应中未见 usage');
 
+  add('api-result', '接口业务结果', 'pass', '已收到模型回复');
   if (lastResponse.text?.length) add('content', '回复正文', 'pass', `${lastResponse.text.length} 字符`);
-  else if (lastResponse.httpStatus === 200) add('content', '回复正文', 'fail', 'HTTP 200 但无文本');
+  else if (lastResponse.httpStatus === 200) {
+    const detail = lastResponse.diagnosis?.title || 'HTTP 200 但无文本';
+    add('content', '回复正文', 'fail', detail);
+  }
 
   if (assembled?.id) add('id', '消息 ID', 'pass', assembled.id);
   else if (ep === 'anthropic' && lastResponse.httpStatus === 200) add('id', '消息 ID', 'warn', 'assembled 无 id');
@@ -942,7 +1575,7 @@ function renderComplianceHtml(report) {
   if (!report) return '<div class="resp-placeholder">发送请求后显示兼容性检查结果</div>';
   const icons = { pass: '✓', fail: '✗', warn: '!' };
   const items = report.checks.map(c => `
-    <div class="check-item ${c.status}">
+    <div class="check-item ${c.status}${c.id === 'diagnosis' ? ' diagnosis' : ''}">
       <span class="check-icon">${icons[c.status]}</span>
       <div class="check-body">
         <div class="check-label">${escapeHtml(c.label)}</div>
@@ -1001,6 +1634,45 @@ function showTab(tab) {
   }
 }
 
+// ── Persist to hub DB ──
+async function persistCheckLogToServer(overallOk) {
+  try {
+    const req = lastResponse.request;
+    if (!req) return;
+    const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
+    const resolved = req.resolvedEndpoint || 'chat';
+    if (!['chat', 'responses', 'anthropic'].includes(resolved)) return;
+    const payload = {
+      baseUrl,
+      requestUrl: req.url,
+      model: (req.body && req.body.model) || document.getElementById('model').value || '',
+      endpointMode: req.endpointMode || currentEndpoint || 'auto',
+      resolvedEndpoint: resolved,
+      stream: !!(req.body && req.body.stream),
+      viaProxy: !!req.viaProxy,
+      httpStatus: lastResponse.httpStatus ?? null,
+      success: !!overallOk,
+      elapsedMs: lastResponse.elapsed ?? null,
+      diagnosis: lastResponse.diagnosis ? {
+        code: lastResponse.diagnosis.code,
+        title: lastResponse.diagnosis.title,
+        summary: lastResponse.diagnosis.summary,
+      } : null,
+      errorMessage: overallOk ? null : String(lastResponse.error || lastResponse.diagnosis?.summary || '').slice(0, 4000),
+      compliance: lastResponse.compliance || null,
+      responseSnippet: String(lastResponse.text || '').slice(0, 2000),
+    };
+    const res = await fetch('/api/relay-api-check/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.warn('[check] save log', res.status, await res.text().catch(() => ''));
+  } catch (e) {
+    console.warn('[check] save log failed', e);
+  }
+}
+
 // ── History ──
 function addHistory(item) {
   history.unshift(item);
@@ -1044,7 +1716,7 @@ function clearHistory() {
 function clearAll() {
   document.getElementById('user-message').value = '';
   document.getElementById('system-prompt').value = '';
-  lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
+  lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
   document.getElementById('resp-body').innerHTML = '<div class="resp-placeholder">发送请求后，响应将显示在此处</div>';
   document.getElementById('resp-time').style.display = 'none';
   document.getElementById('resp-tokens').style.display = 'none';
@@ -1088,6 +1760,21 @@ function copyDiagnostics() {
     lines.push('```');
   }
 
+  if (lastResponse.diagnosis) {
+    lines.push('');
+    lines.push('### 诊断建议');
+    const d = lastResponse.diagnosis;
+    lines.push(`- **${d.title}**: ${d.summary}`);
+    (d.hints || []).forEach(h => lines.push(`  - ${h}`));
+    if (d.apiProbe?.length) {
+      lines.push('');
+      lines.push('### API 路径探测');
+      d.apiProbe.forEach(p => {
+        lines.push(`- ${p.url} → ${p.kind}${p.httpStatus != null ? ` (HTTP ${p.httpStatus})` : ''}`);
+      });
+    }
+  }
+
   if (lastResponse.compliance) {
     lines.push('');
     lines.push('### 兼容性检查');
@@ -1101,6 +1788,9 @@ function copyDiagnostics() {
   if (lastResponse.error) {
     lines.push(`状态: 失败`);
     if (lastResponse.httpStatus) lines.push(`HTTP 状态码: ${lastResponse.httpStatus}`);
+    if (lastResponse.apiFailure) {
+      lines.push(`业务错误: ${lastResponse.apiFailure.reason}`);
+    }
     lines.push(`错误信息: ${lastResponse.error}`);
   } else if (lastResponse.text) {
     lines.push(`状态: 成功`);
