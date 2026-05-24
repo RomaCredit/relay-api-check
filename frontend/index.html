@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260524-claude-cli-v1">
+<meta name="check-build" content="20260524-claude-cli-v2-persist">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1004,6 +1004,62 @@ async function sendClaudeCliRequest() {
     sendBtn.innerHTML = '<span>▶</span> 发送';
     sendBtn.style.background = '';
     abortController = null;
+    if (lastClaudeCliResult) {
+      const saved = await persistClaudeCliCheckLogToServer(lastClaudeCliResult);
+      const st = document.getElementById('status-text');
+      if (saved && st) st.textContent = `${st.textContent} · 已入库`;
+    }
+  }
+}
+
+/** Claude CLI 结果写入 Hub（不含 API Key） */
+async function persistClaudeCliCheckLogToServer(data, attempt = 0) {
+  try {
+    const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
+    if (!baseUrl || !data) return false;
+    const modelName = (document.getElementById('model').value || '').trim() || 'claude-cli';
+    const prompt = (document.getElementById('user-message').value || '').trim() || CLAUDE_CLI_DEFAULT_PROMPT;
+    const ok = !!data.ok;
+    const diag = data.diagnosis || {};
+    let httpStatus = null;
+    if (data.timedOut) httpStatus = 408;
+    else if (data.exitCode === 0) httpStatus = 200;
+    else if (typeof data.exitCode === 'number') httpStatus = 500;
+    const payload = {
+      baseUrl,
+      requestUrl: `${baseUrl}#claude-cli`,
+      model: modelName.slice(0, 120),
+      endpointMode: 'claude-cli',
+      resolvedEndpoint: 'claude_cli',
+      stream: false,
+      viaProxy: false,
+      httpStatus,
+      success: ok,
+      elapsedMs: data.durationMs ?? null,
+      diagnosis: {
+        code: data.status || undefined,
+        summary: diag.note || data.message || undefined,
+      },
+      errorMessage: ok ? null : String(data.stderr || data.message || diag.note || '').slice(0, 4000),
+      compliance: null,
+      responseSnippet: String(data.stdout || '').slice(0, 2000),
+    };
+    const res = await fetch('/api/relay-api-check/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+    if (!res.ok) {
+      console.warn('[check] claude cli save log', res.status, await res.text().catch(() => ''));
+      if (attempt < 1) return persistClaudeCliCheckLogToServer(data, attempt + 1);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[check] claude cli save log failed', e);
+    if (attempt < 1) return persistClaudeCliCheckLogToServer(data, attempt + 1);
+    return false;
   }
 }
 
@@ -1872,7 +1928,6 @@ async function persistCheckLogToServer(overallOk, attempt = 0) {
     if (!req) return false;
     const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
     if (!baseUrl) return false;
-    if (req.type === 'claude_cli' || req.resolvedEndpoint === 'claude-cli') return false;
     let resolved = req.resolvedEndpoint || getResolvedEndpoint();
     if (!['chat', 'responses', 'anthropic'].includes(resolved)) resolved = getResolvedEndpoint();
     const modelName = (req.body && req.body.model) || document.getElementById('model').value || 'unknown';
