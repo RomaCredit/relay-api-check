@@ -11,6 +11,7 @@ Live demo: [https://check.romaapi.com](https://check.romaapi.com)
 ## Features
 
 - **Three API shapes**: OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), Anthropic Messages (`/v1/messages`)
+- **Claude CLI real-client test** (`/api/test-claude-cli`) for keys that only accept Claude Code / Claude CLI (not plain HTTP)
 - **Auto endpoint routing** by model name (e.g. `claude*` → Anthropic, `gpt-5.4` → Responses)
 - **CORS proxy** (`/api/proxy`) for browser-side testing
 - **Tabs**: text reply, response detail (raw HTTP + body), request detail, compliance checks
@@ -29,11 +30,49 @@ Open **http://localhost:8080**
 - Frontend: static `frontend/index.html`
 - Proxy: `http://proxy:8090` (exposed only inside compose network; Caddy routes `/api/proxy`)
 
+## Claude CLI real-client test
+
+Some relay keys return `only allows Claude Code clients` on `/v1/messages` or `/v1/chat/completions` but work when called via the official **Claude CLI** (`claude -p`).
+
+In the UI, choose **Claude CLI · claude -p 真实客户端**. The backend runs (no shell):
+
+```text
+claude -p "Reply with only: OK"
+```
+
+with environment:
+
+- `ANTHROPIC_BASE_URL` ← Base URL
+- `ANTHROPIC_AUTH_TOKEN` ← API Key
+- `ANTHROPIC_MODEL` ← Model (optional)
+- `ANTHROPIC_API_KEY` cleared
+
+**Server requirements**
+
+- Must run on a **VPS / Docker / own server** where you can install the CLI.
+- **Not suitable** for Vercel, Netlify, Cloudflare Pages, or other serverless hosts.
+- Before use, on the **same machine/container** that runs `api-check-proxy`:
+
+  ```bash
+  claude --version
+  ```
+
+Install Claude Code / Claude CLI per [Anthropic documentation](https://docs.anthropic.com/en/docs/claude-code) (e.g. `npm install -g @anthropic-ai/claude-code` on the host, then ensure the proxy container can execute `claude` via `PATH` or mount the binary).
+
+Optional env:
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_CLI_PATH` | Path to `claude` binary (default: `claude`) |
+
+API keys are **never** logged or stored; responses only include a masked key (`sk-abc…xyz1`).
+
 ## Configuration
 
 | Variable | Description |
 |----------|-------------|
 | `ALLOWED_ORIGINS` | Comma-separated origins allowed to call `/api/proxy` (must match your UI URL) |
+| `CLAUDE_CLI_PATH` | Executable for Claude CLI tests (default `claude`) |
 
 See [SECURITY.md](./SECURITY.md) before exposing the proxy publicly.
 

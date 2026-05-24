@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import socket
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +14,15 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+
+from claude_cli_test import (
+    ClaudeCliTestRequest,
+    check_rate_limit,
+    client_ip,
+    normalize_base_url,
+    run_claude_cli_test,
+    validate_base_url_ssrf,
+)
 
 ALLOWED_ORIGINS = [
     o.strip()
@@ -41,12 +51,44 @@ STRIP_WHEN_BUFFERED = {
     "transfer-encoding",
 }
 
-ALLOWED_PATH_PREFIXES = (
-    "/v1/chat/completions",
-    "/v1/responses",
-    "/v1/messages",
-    "/v1/models",
+# OpenAI 形态：/v1/...；部分中转站（如 NekoCode）为 /api/v1/...
+_ALLOWED_RELAY_SUFFIXES = (
+    "chat/completions",
+    "responses",
+    "messages",
+    "models",
 )
+
+
+_SAFE_PATH_SEGMENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _relay_api_path_allowed(path: str) -> bool:
+    """允许 /v1/...、/api/v1/...，以及分组前缀路径如 /codex-pro/v1/chat/completions。"""
+    if not path or ".." in path:
+        return False
+    path = (path.split("?")[0] or "/").rstrip("/") or "/"
+    if not re.match(r"^(/[a-zA-Z0-9][a-zA-Z0-9._/-]*)?$", path):
+        return False
+    for suffix in _ALLOWED_RELAY_SUFFIXES:
+        needle = f"/v1/{suffix}"
+        if needle not in path:
+            continue
+        tail = path[path.index(needle) :]
+        if tail != needle and not tail.startswith(f"{needle}/"):
+            continue
+        prefix = path[: path.index(needle)]
+        if prefix == "":
+            return True
+        segments = [s for s in prefix.split("/") if s]
+        if segments and all(_SAFE_PATH_SEGMENT.match(s) for s in segments):
+            return True
+    return False
+
+
+def _allowed_path_hint() -> str:
+    bases = ", ".join(f"/v1/{s} 或 /api/v1/{s}" for s in _ALLOWED_RELAY_SUFFIXES)
+    return f"{bases}；或分组前缀如 /codex-pro/v1/chat/completions"
 
 app = FastAPI(title="API Check Proxy", version="0.1.0")
 app.add_middleware(
@@ -96,10 +138,20 @@ def validate_target_url(url: str) -> str:
     if host in {"localhost", "127.0.0.1", "::1"}:
         raise HTTPException(status_code=400, detail="禁止访问本地地址")
     path = parsed.path or "/"
-    if not any(path.startswith(p) for p in ALLOWED_PATH_PREFIXES):
+    if not _relay_api_path_allowed(path):
         raise HTTPException(
             status_code=400,
-            detail=f"路径须以 {', '.join(ALLOWED_PATH_PREFIXES)} 之一开头",
+            detail={
+                "code": "proxy_path_not_allowed",
+                "message": f"检测代理不允许路径: {path}",
+                "path": path,
+                "allowed": _allowed_path_hint(),
+                "hint": (
+                    "Base URL 填到分组入口即可，例如 https://www.right.codes/codex-pro；"
+                    "本工具会拼接 /v1/chat/completions 等。"
+                    "若 API 在 /api/v1/...，Base URL 用 https://域名/api（勿含 /api/v1）。"
+                ),
+            },
         )
     for ip in _resolve_host_ips(host):
         if _is_blocked_ip(ip):
@@ -122,6 +174,31 @@ def filter_response_headers(headers: httpx.Headers, *, buffered: bool = False) -
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/api/test-claude-cli")
+async def test_claude_cli(request: Request, payload: ClaudeCliTestRequest) -> dict:
+    """
+    通过子进程执行 `claude -p`（非 shell），注入 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN。
+    用于验证仅 Claude Code / Claude CLI 可使用的 Key；不记录、不日志 apiKey。
+    """
+    ip = client_ip(request)
+    check_rate_limit(ip)
+
+    base_url = normalize_base_url(payload.baseUrl)
+    validate_base_url_ssrf(base_url, _resolve_host_ips)
+
+    prompt = (payload.prompt or "").strip() or "Reply with only: OK"
+    model = (payload.model or "").strip() or None
+
+    # 切勿记录 payload.apiKey
+    return await run_claude_cli_test(
+        base_url=base_url,
+        api_key=payload.apiKey,
+        model=model,
+        prompt=prompt,
+        timeout_ms=payload.timeoutMs,
+    )
 
 
 @app.post("/api/proxy")

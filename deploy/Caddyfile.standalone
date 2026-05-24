@@ -1,5 +1,9 @@
 # Standalone: Caddy serves frontend + reverse_proxy to api-check-proxy
 :80 {
+	handle /api/test-claude-cli* {
+		reverse_proxy proxy:8090
+	}
+
 	handle /api/proxy* {
 		reverse_proxy proxy:8090 {
 			flush_interval -1
