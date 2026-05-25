@@ -439,6 +439,46 @@ function analyzeApiResponse(json) {
   return { ok: false, code: 'no_assistant_content', reason: '响应中无 choices / content / output 等模型回复字段' };
 }
 
+/** 从单条 OpenAI/Anthropic/Responses 流式 chunk 提取可见正文 */
+function extractTextFromStreamChunk(json) {
+  if (!json || typeof json !== 'object') return '';
+  const parts = [];
+  const delta = json.choices?.[0]?.delta;
+  if (delta?.content) parts.push(delta.content);
+  if (delta?.text) parts.push(delta.text);
+  const msg = json.choices?.[0]?.message;
+  if (msg?.content) parts.push(msg.content);
+  if (json.choices?.[0]?.text) parts.push(json.choices[0].text);
+  if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta' && json.delta.text) {
+    parts.push(json.delta.text);
+  }
+  const outputDelta = json.output?.[0]?.content?.[0]?.text
+    || (json.delta?.text && json.delta?.type !== 'text_delta' ? json.delta.text : null);
+  if (outputDelta) parts.push(outputDelta);
+  if (json.type === 'response.output_text.delta' && json.delta) parts.push(json.delta);
+  return parts.join('');
+}
+
+function sseEmptyContentDiagnosis(parsed, raw) {
+  const n = parsed.streamEvents?.length || 0;
+  const usage = parsed.finalJson?.assembled?.usage
+    || parsed.streamEvents?.find((e) => e?.usage)?.usage
+    || parsed.streamEvents?.[0]?.usage;
+  const outTok = usage?.completion_tokens ?? usage?.output_tokens ?? 0;
+  const dataLines = (String(raw || '').match(/^data:\s/gm) || []).length;
+  return {
+    code: 'sse_empty_content',
+    title: 'SSE 已连通但无模型正文',
+    summary: `解析到 ${n} 条 data 事件（原始约 ${dataLines} 行），completion_tokens=${outTok}`,
+    hints: [
+      'HTTP 200 + text/event-stream 说明网关与鉴权大致正常，但未收到 delta.content 等正文增量。',
+      '常见原因：stream:false 时上游只回结束帧；Key 分组/模型不可用；余额不足；或通道被限流。',
+      '建议开启「流式输出 (Stream)」再测同一 Key；若仍无正文，到 apimaster 控制台看用量与错误日志。',
+      '若仅需非流式 JSON，请确认中转站是否支持 stream:false 并返回完整 choices[0].message。',
+    ],
+  };
+}
+
 function responseLooksLikeJsonNotSse(contentType) {
   const ct = (contentType || '').toLowerCase();
   return ct.includes('application/json') && !ct.includes('text/event-stream');
@@ -448,6 +488,180 @@ function responseLooksLikeHtml(contentType, rawBody) {
   const ct = (contentType || '').toLowerCase();
   const body = String(rawBody || '');
   return ct.includes('text/html') || /^\s*<!doctype/i.test(body) || /^\s*<html[\s>]/i.test(body);
+}
+
+function responseLooksLikeSse(contentType, rawBody) {
+  const ct = (contentType || '').toLowerCase();
+  const body = String(rawBody || '');
+  return ct.includes('text/event-stream') || /^\s*data:\s*[\[{]/.test(body);
+}
+
+/** 解析整段 SSE 文本（用于 stream:false 但上游仍返回 event-stream 的情况） */
+function parseSseText(rawText, ctx) {
+  const streamEvents = [];
+  let fullText = '';
+  let finalJson = null;
+  const lines = String(rawText || '').split('\n');
+
+  for (const line of lines) {
+    if (!line.startsWith('data: ')) continue;
+    const data = line.slice(6).trim();
+    if (data === '[DONE]') continue;
+    try {
+      const json = JSON.parse(data);
+      streamEvents.push(json);
+
+      if (json.success === false || json.error) {
+        const fail = analyzeApiResponse(json);
+        if (!fail.ok && ctx) {
+          throwRelayApiFailure(lastResponse.httpStatus || 200, json, fail, ctx);
+        }
+      }
+
+      const piece = extractTextFromStreamChunk(json);
+      if (piece) fullText += piece;
+
+      if (json.type === 'message_start' && json.message) {
+        finalJson = { ...json.message, content: [{ type: 'text', text: '' }] };
+        const u = json.message.usage;
+        if (u) showTokens((u.input_tokens || 0) + (u.output_tokens || 0), u.input_tokens, u.output_tokens);
+      }
+      if (json.type === 'message_delta') {
+        if (json.delta?.stop_reason && finalJson) finalJson.stop_reason = json.delta.stop_reason;
+        if (json.usage && finalJson) {
+          finalJson.usage = { ...finalJson.usage, ...json.usage };
+          const inp = finalJson.usage?.input_tokens || 0;
+          showTokens(inp + json.usage.output_tokens, inp, json.usage.output_tokens);
+        }
+      }
+      if (json.type === 'response.output_text.delta' && json.delta) fullText += json.delta;
+      if (json.type === 'response.completed' && json.response) {
+        finalJson = json.response;
+        const u = json.response.usage;
+        if (u) showTokens(u.total_tokens || (u.input_tokens + u.output_tokens), u.input_tokens, u.output_tokens);
+      }
+      if (json.usage && json.choices && !json.type) {
+        if (!finalJson) finalJson = { choices: [{ message: { role: 'assistant', content: '' } }] };
+        finalJson.usage = json.usage;
+      }
+    } catch (e) {
+      if (String(e?.message || e).includes('接口未成功')) throw e;
+    }
+  }
+
+  if (finalJson?.content?.[0]?.type === 'text') {
+    finalJson.content[0].text = fullText;
+  } else if (finalJson?.choices?.[0]?.message) {
+    finalJson.choices[0].message.content = fullText;
+  } else if (fullText && !finalJson) {
+    finalJson = { choices: [{ message: { role: 'assistant', content: fullText } }] };
+  }
+
+  if (streamEvents.length) {
+    finalJson = {
+      format: 'server-sent_events',
+      eventCount: streamEvents.length,
+      assembled: finalJson,
+      events: streamEvents,
+    };
+  }
+
+  return { fullText, finalJson, streamEvents };
+}
+
+function parseJsonFromRaw(raw, status, ctx) {
+  const ct = lastResponse.contentType || '';
+  const diagnosis = diagnoseApiIssue({
+    status,
+    contentType: ct,
+    rawBody: raw.slice(0, 4000),
+    requestUrl: lastResponse.request?.url,
+    viaProxy: lastResponse.request?.viaProxy,
+    baseUrl: document.getElementById('base-url').value.trim(),
+    resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
+    jsonParseError: null,
+    stream: false,
+  });
+  if (diagnosis?.code === 'html_not_api') {
+    lastResponse.diagnosis = diagnosis;
+    const hintBlock = diagnosis.hints.map(h => '• ' + h).join('\n');
+    throw new Error(`${diagnosis.title}\n${diagnosis.summary}\n${hintBlock}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    const d2 = diagnoseApiIssue({
+      status,
+      contentType: ct,
+      rawBody: raw.slice(0, 4000),
+      requestUrl: lastResponse.request?.url,
+      viaProxy: lastResponse.request?.viaProxy,
+      baseUrl: document.getElementById('base-url').value.trim(),
+      resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
+      jsonParseError: e.message,
+      stream: false,
+    });
+    if (d2) {
+      lastResponse.diagnosis = d2;
+      const hintBlock = d2.hints.map(h => '• ' + h).join('\n');
+      throw new Error(`${d2.title}\n${d2.summary}\n${hintBlock}`);
+    }
+    throw new Error(`JSON 解析失败 (${status}): ${e.message}\n${raw.slice(0, 800)}`);
+  }
+}
+
+/** 非流式请求：JSON 整包，或上游误返回 SSE 时自动按 SSE 解析 */
+async function consumeNonStreamApiResponse(res, ctx) {
+  const raw = await res.text();
+  if (responseLooksLikeHtml(lastResponse.contentType, raw)) {
+    await failWithHtmlDiagnosis(res.status, raw, { ...ctx, stream: false });
+  }
+  if (responseLooksLikeSse(lastResponse.contentType, raw)) {
+    lastResponse.sseDespiteNonStream = true;
+    const parsed = parseSseText(raw, ctx);
+    let { fullText, finalJson } = parsed;
+    if (!fullText.trim()) {
+      const diag = sseEmptyContentDiagnosis(parsed, raw);
+      lastResponse.diagnosis = {
+        ...diag,
+        hints: [
+          '请求 stream:false，但上游返回 text/event-stream（已按 SSE 解析）。',
+          ...diag.hints,
+        ],
+      };
+      throwRelayApiFailure(res.status, finalJson ?? { raw: raw.slice(0, 500) }, {
+        ok: false,
+        code: 'sse_empty_content',
+        reason: diag.summary,
+      }, ctx);
+    }
+    const analysis = analyzeApiResponse(finalJson);
+    if (!analysis.ok && !fullText.trim()) {
+      throwRelayApiFailure(res.status, finalJson ?? { raw: raw.slice(0, 500) }, analysis, ctx);
+    }
+    if (analysis.text && !fullText.trim()) fullText = analysis.text;
+    lastResponse.diagnosis = {
+      code: 'sse_when_non_stream',
+      title: '非流式请求收到 SSE',
+      summary: '请求 stream:false，但上游返回 text/event-stream；已按 SSE 解析出正文',
+      hints: [
+        '若需非流式 JSON，请在中转站确认 stream 参数是否生效。',
+      ],
+    };
+    return { json: finalJson, fullText };
+  }
+  const json = parseJsonFromRaw(raw, res.status, ctx);
+  const analysis = analyzeApiResponse(json);
+  if (!analysis.ok) {
+    throwRelayApiFailure(res.status, json, analysis, ctx);
+  }
+  const usage = json.usage;
+  if (usage) {
+    const inp = usage.prompt_tokens || usage.input_tokens || 0;
+    const out = usage.completion_tokens || usage.output_tokens || 0;
+    showTokens(usage.total_tokens || (inp + out), inp, out);
+  }
+  return { json, fullText: analysis.text };
 }
 
 async function failWithHtmlDiagnosis(status, rawBody, ctx) {
@@ -639,6 +853,17 @@ function diagnoseApiIssue(ctx) {
   }
 
   if (jsonParseError && status === 200) {
+    if (responseLooksLikeSse(contentType, body)) {
+      return {
+        code: 'sse_when_non_stream',
+        title: '非流式请求收到 SSE',
+        summary: '正文以 data: 开头或 Content-Type 为 text/event-stream，不是 JSON 整包',
+        hints: [
+          '接口可能正常；请开启「流式输出」重试，或等待检测页自动按 SSE 解析（若已更新）。',
+          '若必须非流式 JSON，请确认中转站是否忽略 stream:false。',
+        ],
+      };
+    }
     const nested = diagnoseApiIssue({ ...ctx, rawBody: body.slice(0, 4000), jsonParseError: null });
     if (nested) return nested;
     return {
@@ -1075,7 +1300,7 @@ let abortController = null;
 let history = JSON.parse(localStorage.getItem('api_test_history') || '[]');
 let savedConfigs = JSON.parse(localStorage.getItem('api_test_configs') || '[]');
 let activeTab = 'text';
-let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null };
+let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null, streamJsonFallback: false, sseDespiteNonStream: false };
 
 const SCENARIOS = [
   { id: 'anthropic-stream', name: 'Anthropic · 流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: true, user: '用一句话回复：兼容性检测通过' },
@@ -1160,43 +1385,13 @@ function shouldUseProxy(url) {
 }
 
 async function readResponseJson(res) {
-  const ct = res.headers.get('content-type') || '';
   const raw = await res.text();
-  const diagnosis = diagnoseApiIssue({
-    status: res.status,
-    contentType: ct,
-    rawBody: raw.slice(0, 4000),
-    requestUrl: lastResponse.request?.url,
+  return parseJsonFromRaw(raw, res.status, {
+    url: lastResponse.request?.url,
     viaProxy: lastResponse.request?.viaProxy,
     baseUrl: document.getElementById('base-url').value.trim(),
     resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
-    jsonParseError: null,
   });
-  if (diagnosis?.code === 'html_not_api') {
-    lastResponse.diagnosis = diagnosis;
-    const hintBlock = diagnosis.hints.map(h => '• ' + h).join('\n');
-    throw new Error(`${diagnosis.title}\n${diagnosis.summary}\n${hintBlock}`);
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    const d2 = diagnoseApiIssue({
-      status: res.status,
-      contentType: ct,
-      rawBody: raw.slice(0, 4000),
-      requestUrl: lastResponse.request?.url,
-      viaProxy: lastResponse.request?.viaProxy,
-      baseUrl: document.getElementById('base-url').value.trim(),
-      resolvedEndpoint: lastResponse.request?.resolvedEndpoint || getResolvedEndpoint(),
-      jsonParseError: e.message,
-    });
-    if (d2) {
-      lastResponse.diagnosis = d2;
-      const hintBlock = d2.hints.map(h => '• ' + h).join('\n');
-      throw new Error(`${d2.title}\n${d2.summary}\n${hintBlock}`);
-    }
-    throw new Error(`JSON 解析失败 (${res.status}): ${e.message}\n${raw.slice(0, 800)}`);
-  }
 }
 
 async function apiFetch(url, reqHeaders, body, signal) {
@@ -1377,6 +1572,7 @@ async function sendRequest() {
   lastResponse.diagnosis = null;
   lastResponse.apiFailure = null;
   lastResponse.streamJsonFallback = false;
+  lastResponse.sseDespiteNonStream = false;
   lastResponse.responseHeaders = null;
   lastResponse.contentType = null;
   lastResponse.elapsed = null;
@@ -1477,22 +1673,9 @@ async function sendRequest() {
               }
             }
 
-            const choiceDelta = json.choices?.[0]?.delta;
-            // 仅拼接对用户可见的正文；reasoning_content 不写入（部分中转站 Claude 会分轨推送）
-            if (choiceDelta?.content) {
-              fullText += choiceDelta.content;
-              updateStreamText(fullText);
-            }
-
-            if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
-              fullText += json.delta.text;
-              updateStreamText(fullText);
-            }
-
-            const outputDelta = json.output?.[0]?.content?.[0]?.text
-              || (json.delta?.text && json.delta?.type !== 'text_delta' ? json.delta.text : null);
-            if (outputDelta) {
-              fullText += outputDelta;
+            const piece = extractTextFromStreamChunk(json);
+            if (piece) {
+              fullText += piece;
               updateStreamText(fullText);
             }
 
@@ -1570,7 +1753,7 @@ async function sendRequest() {
       }
       } // end SSE branch
     } else {
-      const handled = await consumeJsonApiResponse(res, {
+      const handled = await consumeNonStreamApiResponse(res, {
         url, viaProxy, baseUrl, resolvedEndpoint,
       });
       finalJson = handled.json;
@@ -1621,7 +1804,9 @@ async function sendRequest() {
     showTab('text');
     document.getElementById('resp-body').innerHTML = `<div class="resp-text">${escapeHtml(fullText)}</div>`;
 
-    setStatus('ok', `完成 · ${(elapsed/1000).toFixed(2)}s`);
+    setStatus('ok', lastResponse.sseDespiteNonStream
+      ? `完成 · ${(elapsed/1000).toFixed(2)}s · 已按 SSE 解析（上游未遵守 stream:false）`
+      : `完成 · ${(elapsed/1000).toFixed(2)}s`);
 
     logOutcome = true;
     addHistory({ time: new Date().toLocaleTimeString(), model, endpoint: currentEndpoint, question: userMsg.slice(0, 60), status: 'ok', answer: fullText.slice(0, 100) });
@@ -1742,7 +1927,7 @@ function runComplianceCheck() {
 
   if (lastResponse.diagnosis) {
     const d = lastResponse.diagnosis;
-    const diagFail = d.code === 'html_not_api' || d.code === 'proxy_path_denied' || d.code === 'auth_failed' || d.code === 'claude_code_only';
+    const diagFail = d.code === 'html_not_api' || d.code === 'proxy_path_denied' || d.code === 'auth_failed' || d.code === 'claude_code_only' || d.code === 'sse_empty_content';
     add('diagnosis', '诊断建议', diagFail ? 'fail' : 'warn',
       [d.summary, ...(d.hints || [])].join(' · '));
   }
@@ -1797,7 +1982,10 @@ function runComplianceCheck() {
   const assembled = getAssembledBody();
   const events = lastResponse.json?.events;
 
-  if (stream && lastResponse.streamJsonFallback) {
+  if (!stream && lastResponse.sseDespiteNonStream) {
+    add('stream-mode', '流式响应', 'warn',
+      '已请求 stream:false，但上游返回 text/event-stream；已按 SSE 解析');
+  } else if (stream && lastResponse.streamJsonFallback) {
     add('stream-mode', '流式响应', 'warn',
       '已请求 stream，但上游返回 application/json 整包（非 SSE）；已按 JSON 解析');
   } else if (stream && lastResponse.contentType?.includes('text/event-stream')) {
