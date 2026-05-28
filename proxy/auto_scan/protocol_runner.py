@@ -91,7 +91,7 @@ async def run_protocol_probe(
             url,
             headers=headers,
             content=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            timeout=httpx.Timeout(connect=25.0, read=120.0, write=30.0),
+            timeout=httpx.Timeout(connect=25.0, read=120.0, write=30.0, pool=25.0),
         )
         cell.http_status = res.status_code
         cell.content_type = res.headers.get("content-type")
