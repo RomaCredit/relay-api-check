@@ -1,0 +1,63 @@
+# 协议能力探测项（与前端 runComplianceCheck 对齐，供 auto_scan 使用）
+schemaVersion: 1
+
+endpoints:
+  chat:
+    path_suffix: /v1/chat/completions
+    auth: bearer
+    fields:
+      - id: temperature
+        required: true
+      - id: max_tokens
+        required: true
+      - id: stream
+        required: false
+    stream_events: []
+
+  responses:
+    path_suffix: /v1/responses
+    auth: bearer
+    fields:
+      - id: temperature
+        required: true
+      - id: max_output_tokens
+        required: true
+      - id: instructions
+        required: false
+      - id: stream
+        required: false
+    stream_events: []
+
+  anthropic:
+    path_suffix: /v1/messages
+    auth: anthropic
+    fields:
+      - id: temperature
+        required: true
+      - id: max_tokens
+        required: true
+      - id: system
+        required: false
+      - id: stream
+        required: false
+    stream_events:
+      - message_start
+      - content_block_delta
+      - message_stop
+
+profiles:
+  quick:
+    discover_models: true
+    protocol_matrix: sync_only
+    parameter_checks: false
+    agents: [claude_cli]
+  standard:
+    discover_models: true
+    protocol_matrix: full
+    parameter_checks: true
+    agents: [claude_cli, codex]
+  deep:
+    discover_models: true
+    protocol_matrix: full
+    parameter_checks: true
+    agents: [claude_cli, codex, opencode, kiro]

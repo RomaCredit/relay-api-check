@@ -16,6 +16,7 @@ Live demo: [https://check.romaapi.com](https://check.romaapi.com)
 - **CORS proxy** (`/api/proxy`) for browser-side testing
 - **Tabs**: text reply, response detail (raw HTTP + body), request detail, compliance checks
 - **One-click test scenarios** and diagnostic report export
+- **Auto scan** (`/api/auto-scan`): server-orchestrated discovery, protocol matrix, Agent probes (quick / standard / deep profiles); progress via SSE; optional Hub suite ingest
 
 ## Quick start (Docker)
 
@@ -73,6 +74,8 @@ API keys are **never** logged or stored; responses only include a masked key (`s
 |----------|-------------|
 | `ALLOWED_ORIGINS` | Comma-separated origins allowed to call `/api/proxy` (must match your UI URL) |
 | `CLAUDE_CLI_PATH` | Executable for Claude CLI tests (default `claude`) |
+| `HUB_SUITE_INGEST_URL` | Hub `POST /api/relay-api-check/suite-ingest` URL (optional; RomaAPI compose sets this) |
+| `RELAY_API_CHECK_INGEST_SECRET` | Shared token header `x-relay-check-ingest-token` for Hub ingest (optional) |
 
 See [SECURITY.md](./SECURITY.md) before exposing the proxy publicly.
 
@@ -99,9 +102,24 @@ Without the proxy, cross-origin relays will fail in the browser with CORS errors
 
 ## Project layout
 
+Open **自动扫描** in the UI (or `?mode=auto&base=…`) to run a full relay profile without clicking through each protocol manually.
+
+Auto-scan API:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/auto-scan` | Start scan `{ baseUrl, apiKey, profile? }` → `{ scanId }` |
+| `GET` | `/api/auto-scan/{id}` | Status + report when done |
+| `GET` | `/api/auto-scan/{id}/events` | SSE progress |
+
+## Project layout
+
 ```
 relay-api-check/
-├── frontend/index.html   # Single-page app (no build step)
+├── frontend/index.html   # Manual + auto scan UI
+├── frontend/auto-scan.js # Auto scan tab logic
+├── proxy/auto_scan/      # Orchestrator, discovery, compliance
+├── specs/                # Protocol capability YAML
 ├── proxy/                # FastAPI CORS proxy
 ├── deploy/               # Caddy / Nginx examples
 ├── docker-compose.yml    # Standalone stack

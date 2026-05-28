@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from auto_scan.routes import router as auto_scan_router
 from claude_cli_test import (
     ClaudeCliTestRequest,
     check_rate_limit,
@@ -90,14 +91,15 @@ def _allowed_path_hint() -> str:
     bases = ", ".join(f"/v1/{s} 或 /api/v1/{s}" for s in _ALLOWED_RELAY_SUFFIXES)
     return f"{bases}；或分组前缀如 /codex-pro/v1/chat/completions"
 
-app = FastAPI(title="API Check Proxy", version="0.1.0")
+app = FastAPI(title="API Check Proxy", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "x-relay-check-ingest-token"],
 )
+app.include_router(auto_scan_router)
 
 
 class ProxyRequest(BaseModel):
