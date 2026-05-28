@@ -87,12 +87,16 @@ See [SECURITY.md](./SECURITY.md) before exposing the proxy publicly.
 
 ### RomaAPI production (this monorepo)
 
-`check.romaapi.com` is wired in the root `docker-compose.yml` + `caddy/Caddyfile`:
+`check.romaapi.com` is wired in the root `docker-compose.yml` + `caddy/Caddyfile`.
+
+**Do not `docker build` on the production VPS** (low memory). Use GitHub Actions + GHCR:
 
 ```bash
 cd /path/to/romaapi.com
-docker compose up -d --build api-check-proxy caddy
+./scripts/deploy-api-check-proxy-via-github.sh
 ```
+
+Static `frontend/` is bind-mounted; `git pull` updates the UI without rebuilding the proxy image.
 
 ## Static-only mode (no proxy)
 
