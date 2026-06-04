@@ -4,6 +4,23 @@
 		reverse_proxy proxy:8090
 	}
 
+	handle /api/test-codex-cli* {
+		reverse_proxy proxy:8090
+	}
+
+	handle /api/auto-scan* {
+		reverse_proxy proxy:8090 {
+			flush_interval -1
+			transport http {
+				dial_timeout 30s
+				response_header_timeout 900s
+				read_timeout 900s
+			}
+			request_buffers 0
+			response_buffers 0
+		}
+	}
+
 	handle /api/proxy* {
 		reverse_proxy proxy:8090 {
 			flush_interval -1
