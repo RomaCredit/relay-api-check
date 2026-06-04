@@ -128,6 +128,7 @@
   .resp-body { flex: 1; overflow-y: auto; padding: 14px; }
   .resp-text { line-height: 1.7; white-space: pre-wrap; word-break: break-word; font-size: 13px; }
   .resp-json { font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .request-tab-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
   .resp-placeholder { color: var(--text-dimmer); font-size: 13px; text-align: center; margin-top: 40px; }
 
   /* Streaming cursor */
@@ -428,7 +429,7 @@ const MODEL_PRESETS = [
   { label: '4o-mini',    value: 'gpt-4o-mini' },
   { label: 'o3',         value: 'o3' },
   { label: 'DeepSeek',   value: 'deepseek-chat' },
-  { label: 'Gemini Pro', value: 'gemini-1.5-pro' },
+  { label: 'Gemini 3.1 Pro', value: 'gemini-3.1-pro-preview' },
 ];
 
 function renderModelPresets() {
@@ -2162,7 +2163,7 @@ function showTab(tab) {
         : '<div class="resp-placeholder">暂无回复信息</div>';
     }
   } else if (tab === 'request') {
-    body.innerHTML = lastResponse.request ? `<div class="resp-json">${highlightJson(JSON.stringify(lastResponse.request, null, 2))}</div>` : '<div class="resp-placeholder">暂无请求信息</div>';
+    body.innerHTML = renderRequestTabHtml();
   } else if (tab === 'compliance') {
     if (lastResponse.request?.type === 'claude_cli' && lastClaudeCliResult) {
       body.innerHTML = renderClaudeCliResultHtml(lastClaudeCliResult);
@@ -2279,6 +2280,75 @@ function clearAll() {
   document.getElementById('resp-time').style.display = 'none';
   document.getElementById('resp-tokens').style.display = 'none';
   setStatus('', '就绪');
+}
+
+function renderRequestTabHtml() {
+  if (!lastResponse.request) {
+    return '<div class="resp-placeholder">暂无请求信息</div>';
+  }
+  const req = lastResponse.request;
+  if (req.type === 'claude_cli') {
+    return `<div class="resp-json">${highlightJson(JSON.stringify(req, null, 2))}</div>`;
+  }
+  const proxyHint = req.viaProxy
+    ? '<span class="hint" style="font-size:11px;color:var(--text-dim)">curl 直连上游 URL（页面内请求经服务端代理转发）</span>'
+    : '';
+  return `
+    <div class="request-tab-bar">
+      <button class="icon-btn btn-sm" onclick="copyRequestAsCurl()" title="复制为单行 curl，可在终端直接运行">⎘ 复制 curl</button>
+      ${proxyHint}
+    </div>
+    <div class="resp-json">${highlightJson(JSON.stringify(req, null, 2))}</div>`;
+}
+
+function shellSingleQuote(str) {
+  return `'${String(str).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildCurlFromRequest(req) {
+  if (!req || req.type === 'claude_cli' || !req.url) return '';
+  const apiKey = document.getElementById('api-key').value.trim();
+  const headers = { ...(req.headers || {}) };
+
+  if (Object.prototype.hasOwnProperty.call(headers, 'Authorization')) {
+    headers.Authorization = apiKey ? `Bearer ${apiKey}` : headers.Authorization;
+  }
+  if (Object.prototype.hasOwnProperty.call(headers, 'x-api-key')) {
+    headers['x-api-key'] = apiKey || headers['x-api-key'];
+  }
+
+  const parts = ['curl', '-sS', '-X', req.method || 'POST', shellSingleQuote(req.url)];
+  for (const [name, value] of Object.entries(headers)) {
+    parts.push('-H', shellSingleQuote(`${name}: ${value}`));
+  }
+  if (req.body != null) {
+    parts.push('-d', shellSingleQuote(JSON.stringify(req.body)));
+  }
+  return parts.join(' ');
+}
+
+function copyRequestAsCurl() {
+  const req = lastResponse.request;
+  if (!req || req.type === 'claude_cli') {
+    alert('当前请求不支持生成 curl');
+    return;
+  }
+  const apiKey = document.getElementById('api-key').value.trim();
+  if (!apiKey) {
+    alert('请先填写 API Key（curl 需要完整密钥）');
+    return;
+  }
+  const curl = buildCurlFromRequest(req);
+  if (!curl) {
+    alert('无法生成 curl 命令');
+    return;
+  }
+  navigator.clipboard.writeText(curl).then(() => {
+    setStatus('ok', 'curl 已复制，可粘贴到终端运行');
+    setTimeout(() => {
+      setStatus(lastResponse.error ? 'err' : 'ok', lastResponse.error ? '请求失败' : '完成');
+    }, 2500);
+  });
 }
 
 function copyDiagnostics() {
