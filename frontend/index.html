@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260604-endpoint-model-map-v1">
+<meta name="check-build" content="20260604-endpoint-model-map-v2">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -433,11 +433,10 @@ const MODEL_PRESETS = [
   { label: 'Gemini 3.1 Pro', value: 'gemini-3.1-pro-preview' },
 ];
 
-/** 端点 ↔ 模型族映射（family 由 detectModelFamily 判定） */
-const ENDPOINT_MODEL_FAMILIES = {
-  chat: ['openai', 'deepseek', 'gemini', 'other'],
-  responses: ['openai', 'gemini'],
-  anthropic: ['claude'],
+/** CLI 端点才限制模型族；Chat / Responses / Anthropic 完全开放 */
+const HTTP_OPEN_ENDPOINTS = ['chat', 'responses', 'anthropic'];
+
+const CLI_ENDPOINT_MODEL_FAMILIES = {
   'claude-cli': ['claude'],
   'codex-cli': ['openai'],
 };
@@ -450,13 +449,18 @@ const MODEL_FAMILY_LABELS = {
   other: '其他',
 };
 
-const ENDPOINT_DEFAULT_MODEL = {
-  chat: 'gpt-4o',
-  responses: 'gpt-5.4',
-  anthropic: 'claude-sonnet-4-6',
+const CLI_ENDPOINT_DEFAULT_MODEL = {
   'claude-cli': 'claude-sonnet-4-6',
   'codex-cli': 'gpt-5.4',
 };
+
+function isHttpOpenEndpoint(ep) {
+  return HTTP_OPEN_ENDPOINTS.includes(ep);
+}
+
+function endpointHasModelRestrictions(ep) {
+  return Object.prototype.hasOwnProperty.call(CLI_ENDPOINT_MODEL_FAMILIES, ep);
+}
 
 function detectModelFamily(model) {
   const m = (model || '').trim().toLowerCase();
@@ -469,7 +473,8 @@ function detectModelFamily(model) {
 }
 
 function endpointAllowsModel(ep, model) {
-  const families = ENDPOINT_MODEL_FAMILIES[ep];
+  if (isHttpOpenEndpoint(ep)) return true;
+  const families = CLI_ENDPOINT_MODEL_FAMILIES[ep];
   if (!families) return true;
   const family = detectModelFamily(model);
   if (family === 'other') return families.includes('other');
@@ -477,24 +482,16 @@ function endpointAllowsModel(ep, model) {
 }
 
 function defaultModelForEndpoint(ep) {
-  return ENDPOINT_DEFAULT_MODEL[ep] || 'gpt-4o';
+  return CLI_ENDPOINT_DEFAULT_MODEL[ep] || '';
 }
 
 function preferredEndpointForModel(model, currentEp) {
+  if (isHttpOpenEndpoint(currentEp)) return currentEp;
   if (endpointAllowsModel(currentEp, model)) return currentEp;
   const family = detectModelFamily(model);
-  if (family === 'claude') {
-    return currentEp === 'claude-cli' ? 'claude-cli' : 'anthropic';
-  }
-  if (family === 'openai') {
-    if (currentEp === 'codex-cli') return 'codex-cli';
-    const m = model.toLowerCase();
-    if (m === 'gpt-5.4' || m === 'gpt-5.5') return 'responses';
-    return 'chat';
-  }
-  if (family === 'gemini') return 'responses';
-  if (family === 'deepseek') return 'chat';
-  return 'chat';
+  if (family === 'claude') return 'claude-cli';
+  if (family === 'openai') return 'codex-cli';
+  return currentEp;
 }
 
 const ENDPOINT_LABELS = {
@@ -506,7 +503,10 @@ const ENDPOINT_LABELS = {
 };
 
 function endpointModelRuleHint(ep) {
-  const families = ENDPOINT_MODEL_FAMILIES[ep] || [];
+  if (isHttpOpenEndpoint(ep)) {
+    return `${ENDPOINT_LABELS[ep] || ep}：任意模型均可测试`;
+  }
+  const families = CLI_ENDPOINT_MODEL_FAMILIES[ep] || [];
   const labels = families.map((f) => MODEL_FAMILY_LABELS[f] || f).join('、');
   return `${ENDPOINT_LABELS[ep] || ep} 端点适用模型：${labels}`;
 }
@@ -515,33 +515,44 @@ function updateEndpointModelUi() {
   const model = document.getElementById('model').value.trim();
   document.querySelectorAll('.ep-tab').forEach((tab) => {
     const ep = tab.dataset.ep;
+    if (isHttpOpenEndpoint(ep)) {
+      tab.classList.remove('incompatible');
+      tab.title = '';
+      return;
+    }
     const ok = !model || endpointAllowsModel(ep, model);
     tab.classList.toggle('incompatible', !ok);
     tab.title = ok ? '' : `${endpointModelRuleHint(ep)}（当前模型不适用）`;
   });
   const hintEl = document.getElementById('endpoint-model-hint');
-  if (hintEl) {
-    hintEl.style.display = 'block';
-    hintEl.textContent = endpointModelRuleHint(currentEndpoint);
-    if (model && !endpointAllowsModel(currentEndpoint, model)) {
-      hintEl.innerHTML = `<span style="color:var(--yellow)">当前模型与端点不匹配。</span> ${escapeHtml(endpointModelRuleHint(currentEndpoint))}`;
-    }
+  if (!hintEl) return;
+  if (isHttpOpenEndpoint(currentEndpoint)) {
+    hintEl.style.display = 'none';
+    return;
+  }
+  hintEl.style.display = 'block';
+  hintEl.textContent = endpointModelRuleHint(currentEndpoint);
+  if (model && !endpointAllowsModel(currentEndpoint, model)) {
+    hintEl.innerHTML = `<span style="color:var(--yellow)">当前模型与端点不匹配。</span> ${escapeHtml(endpointModelRuleHint(currentEndpoint))}`;
   }
 }
 
 function renderModelPresets() {
   const current = document.getElementById('model').value;
+  const restrict = endpointHasModelRestrictions(currentEndpoint);
   document.getElementById('model-presets').innerHTML = MODEL_PRESETS.map(p => {
-    const ok = endpointAllowsModel(currentEndpoint, p.value);
+    const ok = !restrict || endpointAllowsModel(currentEndpoint, p.value);
     return `<span class="model-chip ${p.value === current ? 'active' : ''} ${ok ? '' : 'incompatible'}" title="${ok ? '' : escapeHtml(endpointModelRuleHint(currentEndpoint))}" onclick="selectModel('${p.value}')">${p.label}</span>`;
   }).join('');
 }
 
 function selectModel(val) {
   document.getElementById('model').value = val;
-  const newEp = preferredEndpointForModel(val, currentEndpoint);
-  if (newEp !== currentEndpoint) {
-    setEndpoint(newEp, { skipModelReconcile: true });
+  if (endpointHasModelRestrictions(currentEndpoint)) {
+    const newEp = preferredEndpointForModel(val, currentEndpoint);
+    if (newEp !== currentEndpoint) {
+      setEndpoint(newEp, { skipModelReconcile: true });
+    }
   }
   renderModelPresets();
   updateEndpointModelUi();
@@ -550,7 +561,7 @@ function selectModel(val) {
 
 function onModelInput() {
   const model = document.getElementById('model').value.trim();
-  if (model) {
+  if (model && endpointHasModelRestrictions(currentEndpoint)) {
     const newEp = preferredEndpointForModel(model, currentEndpoint);
     if (newEp !== currentEndpoint) {
       setEndpoint(newEp, { skipModelReconcile: true });
@@ -1811,7 +1822,7 @@ function setEndpoint(ep, opts = {}) {
   } else {
     streamToggle.disabled = false;
   }
-  if (!opts.skipModelReconcile) {
+  if (!opts.skipModelReconcile && endpointHasModelRestrictions(ep)) {
     const modelEl = document.getElementById('model');
     const model = modelEl.value.trim();
     if (!model || !endpointAllowsModel(ep, model)) {
@@ -1824,6 +1835,7 @@ function setEndpoint(ep, opts = {}) {
 }
 
 function assertEndpointModelCompatible() {
+  if (isHttpOpenEndpoint(currentEndpoint)) return true;
   const model = document.getElementById('model').value.trim();
   if (!model) return true;
   if (endpointAllowsModel(currentEndpoint, model)) return true;
