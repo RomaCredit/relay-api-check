@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260524-claude-cli-v2-persist">
+<meta name="check-build" content="20260604-codex-cli-v1">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -181,9 +181,6 @@
   .check-item.diagnosis { border-color: rgba(96,165,250,.45); background: rgba(59,130,246,.08); }
   .check-item.diagnosis .check-icon { color: #93c5fd; }
 
-  .scenario-list { display: flex; flex-direction: column; gap: 4px; }
-  .scenario-btn { text-align: left; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 12px; cursor: pointer; transition: all .15s; }
-  .scenario-btn:hover { border-color: var(--accent); color: var(--accent); }
   .check-list { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
   .check-item { display: flex; gap: 8px; align-items: flex-start; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface2); }
   .check-item.pass { border-color: rgba(34,197,94,.35); }
@@ -248,12 +245,6 @@
   <!-- ══ Left Panel ══ -->
   <div class="left-panel">
 
-    <!-- Scenarios -->
-    <div class="panel-section">
-      <div class="section-title">测试场景</div>
-      <div class="scenario-list" id="scenario-list"></div>
-    </div>
-
     <!-- Saved Configs -->
     <div class="panel-section">
       <div class="section-title">中转站配置</div>
@@ -280,17 +271,23 @@
     <div class="panel-section">
       <div class="section-title">接口端点</div>
       <div class="endpoint-tabs" style="flex-wrap:wrap;gap:4px">
-        <div class="ep-tab active" data-ep="auto" onclick="setEndpoint('auto')" style="flex:1 1 100%">Auto 自动识别<br><span style="font-weight:400;font-size:10px" id="auto-hint">根据模型名自动选择接口</span></div>
-        <div class="ep-tab" data-ep="chat" onclick="setEndpoint('chat')">Chat<br><span style="font-weight:400;font-size:10px">/v1/chat/completions</span></div>
+        <div class="ep-tab active" data-ep="chat" onclick="setEndpoint('chat')">Chat<br><span style="font-weight:400;font-size:10px">/v1/chat/completions</span></div>
         <div class="ep-tab" data-ep="responses" onclick="setEndpoint('responses')">Responses<br><span style="font-weight:400;font-size:10px">/v1/responses</span></div>
         <div class="ep-tab" data-ep="anthropic" onclick="setEndpoint('anthropic')" style="flex:1 1 100%">Anthropic Messages<br><span style="font-weight:400;font-size:10px">/v1/messages · x-api-key</span></div>
         <div class="ep-tab" data-ep="claude-cli" onclick="setEndpoint('claude-cli')" style="flex:1 1 100%">Claude CLI<br><span style="font-weight:400;font-size:10px">claude -p 真实客户端</span></div>
+        <div class="ep-tab" data-ep="codex-cli" onclick="setEndpoint('codex-cli')" style="flex:1 1 100%">Codex CLI<br><span style="font-weight:400;font-size:10px">codex exec 真实客户端</span></div>
       </div>
       <div id="claude-cli-hint" class="ep-hint" style="display:none">
         <strong>Claude Code / CLI 专用 Key 测试</strong><br>
         用于测试仅允许 Claude Code / Claude CLI 使用的 Key。服务端通过 <code>claude -p</code> 发起真实客户端调用，<strong>不会</strong>直接请求 <code>/v1/messages</code>。<br>
         环境变量：<code>ANTHROPIC_BASE_URL</code>、<code>ANTHROPIC_AUTH_TOKEN</code>、可选 <code>ANTHROPIC_MODEL</code>。<br>
         <span style="color:var(--yellow)">流式 (Stream) 在此模式下无效。</span> 服务器须已安装 <code>claude</code> 命令（VPS/Docker，非 Serverless）。
+      </div>
+      <div id="codex-cli-hint" class="ep-hint" style="display:none">
+        <strong>Codex CLI 专用 Key 测试</strong><br>
+        用于测试仅允许 Codex CLI 使用的 Key（走 <code>/v1/responses</code> 且需 Codex 客户端指纹）。服务端通过 <code>codex exec</code> 发起真实客户端调用，<strong>不会</strong>直接请求 HTTP API。<br>
+        配置：<code>OPENAI_API_KEY</code>、<code>openai_base_url</code>（Base URL + <code>/v1</code>）、可选 <code>-m</code> Model。<br>
+        <span style="color:var(--yellow)">流式 (Stream) 在此模式下无效。</span> 服务器须已安装 <code>codex</code> 命令（VPS/Docker，非 Serverless）。
       </div>
     </div>
 
@@ -308,7 +305,7 @@
         </div>
       </div>
       <div class="toggle-row" id="stream-toggle-row">
-        <span class="toggle-label">流式输出 (Stream) <span id="stream-disabled-hint" style="display:none;color:var(--yellow);font-size:10px">（Claude CLI 模式无效）</span></span>
+        <span class="toggle-label">流式输出 (Stream) <span id="stream-disabled-hint" style="display:none;color:var(--yellow);font-size:10px">（CLI 模式无效）</span></span>
         <label class="toggle">
           <input type="checkbox" id="stream-toggle" checked />
           <span class="toggle-slider"></span>
@@ -448,11 +445,10 @@ function selectModel(val) {
 
 function onModelInput() {
   renderModelPresets();
-  if (currentEndpoint === 'auto') updateAutoHint();
   autoSave();
 }
 
-// ── Auto Endpoint Detection ──
+// ── Endpoint recommendation (compliance hints only) ──
 function detectEndpoint(model) {
   if (!model) return 'chat';
   const m = model.toLowerCase();
@@ -460,15 +456,6 @@ function detectEndpoint(model) {
   if (m.startsWith('gemini')) return 'responses';
   if (m === 'gpt-5.4' || m === 'gpt-5.5') return 'responses';
   return 'chat';
-}
-
-const EP_LABELS = { chat: '/v1/chat/completions', responses: '/v1/responses', anthropic: '/v1/messages' };
-
-function updateAutoHint() {
-  const model = document.getElementById('model').value.trim();
-  const detected = detectEndpoint(model);
-  const hint = document.getElementById('auto-hint');
-  if (hint) hint.textContent = `→ ${EP_LABELS[detected]}`;
 }
 
 /** 解析 JSON 是否为真实模型回复（排除 New API 的 success:false、error 等） */
@@ -1361,6 +1348,201 @@ async function persistClaudeCliCheckLogToServer(data, attempt = 0) {
   }
 }
 
+function renderCodexCliResultHtml(data) {
+  const ok = !!data.ok;
+  const bannerClass = ok ? 'ok' : (data.status === 'server_missing_codex_cli' ? 'warn' : 'err');
+  let bannerText = '';
+  if (ok) {
+    bannerText = '✅ Codex CLI 真实客户端调用成功<br>该 Key 可以在 Codex CLI 环境中使用。';
+  } else if (data.status === 'server_missing_codex_cli') {
+    bannerText = '⚠️ 服务端未安装 Codex CLI<br>请先在服务器执行 <code>codex --version</code> 确认可用（需 VPS/Docker，非 Serverless）。';
+  } else {
+    bannerText = '❌ Codex CLI 真实客户端调用失败<br>请检查 Base URL、Key、Model、服务端 Codex CLI 安装状态，或中转站是否限制了更严格的客户端指纹（如 Originator）。';
+  }
+  const diag = data.diagnosis || {};
+  const reply = data.agentOutput || data.stdout || '';
+  return `<div class="cli-card">
+    <div class="cli-banner ${bannerClass}">${bannerText}</div>
+    <h3>Codex CLI 诊断</h3>
+    <div class="cli-row"><b>测试类型</b> Codex CLI 真实客户端</div>
+    <div class="cli-row"><b>Base URL</b> ${escapeHtml(data.baseUrl || '')}</div>
+    <div class="cli-row"><b>openai_base_url</b> ${escapeHtml(data.openaiBaseUrl || '')}</div>
+    <div class="cli-row"><b>Model</b> ${escapeHtml(data.model || '（未设置）')}</div>
+    <div class="cli-row"><b>Key</b> ${escapeHtml(data.maskedKey || '***')}</div>
+    <div class="cli-row"><b>结果</b> ${escapeHtml(data.status || (ok ? 'success' : 'failed'))}${data.timedOut ? ' (超时)' : ''}</div>
+    <div class="cli-row"><b>exitCode</b> ${data.exitCode ?? '—'} · <b>耗时</b> ${data.durationMs ?? 0} ms</div>
+    <div class="cli-row"><b>诊断</b> ${escapeHtml(diag.note || data.message || '')}</div>
+    ${reply ? `<div><b>回复</b><pre>${escapeHtml(reply)}</pre></div>` : ''}
+    ${data.stdout ? `<div><b>stdout</b><pre>${escapeHtml(data.stdout)}</pre></div>` : ''}
+    ${data.stderr ? `<div><b>stderr</b><pre>${escapeHtml(data.stderr)}</pre></div>` : ''}
+  </div>`;
+}
+
+async function sendCodexCliRequest() {
+  const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
+  const apiKey = document.getElementById('api-key').value.trim();
+  const model = document.getElementById('model').value.trim();
+  const userMsg = document.getElementById('user-message').value.trim();
+  const prompt = userMsg || CODEX_CLI_DEFAULT_PROMPT;
+
+  if (!baseUrl) return alert('请填写 Base URL（将映射为 openai_base_url = Base URL + /v1）');
+  if (!apiKey) return alert('请填写 API Key（对应 OPENAI_API_KEY）');
+
+  setStatus('loading', 'Codex CLI 测试中…');
+  isStreaming = true;
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.innerHTML = '<span>■</span> 停止';
+  sendBtn.style.background = 'var(--red)';
+  abortController = new AbortController();
+
+  lastResponse = {
+    text: '', json: null, request: null, responseDetail: null, compliance: null,
+    diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null,
+    httpStatus: null, contentType: null, responseHeaders: null,
+  };
+  lastCodexCliResult = null;
+
+  switchTab('text');
+  document.getElementById('resp-body').innerHTML = '<div class="resp-placeholder">正在服务端执行 codex exec …</div>';
+
+  try {
+    const res = await fetch('/api/test-codex-cli', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseUrl,
+        apiKey,
+        model: model || undefined,
+        prompt,
+        timeoutMs: 30000,
+      }),
+      signal: abortController.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && !data.type) {
+      throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+    }
+    lastCodexCliResult = data;
+    lastResponse.elapsed = data.durationMs;
+    lastResponse.text = data.agentOutput || data.stdout || '';
+    lastResponse.error = data.ok ? null : (data.message || 'failed');
+    lastResponse.request = {
+      type: 'codex_cli',
+      baseUrl,
+      openaiBaseUrl: data.openaiBaseUrl || '',
+      model: model || '',
+      maskedKey: data.maskedKey || maskKeyForDisplay(apiKey),
+      prompt,
+      endpointMode: 'codex-cli',
+      resolvedEndpoint: 'codex-cli',
+    };
+    lastResponse.responseDetail = {
+      type: 'codex_cli',
+      exitCode: data.exitCode,
+      stdout: data.stdout,
+      stderr: data.stderr,
+      agentOutput: data.agentOutput,
+      timedOut: data.timedOut,
+      diagnosis: data.diagnosis,
+    };
+
+    document.getElementById('resp-body').innerHTML = renderCodexCliResultHtml(data);
+    document.getElementById('resp-time').textContent = `${((data.durationMs || 0) / 1000).toFixed(2)}s`;
+    document.getElementById('resp-time').style.display = '';
+    document.getElementById('resp-time').className = data.ok ? 'meta-pill green' : 'meta-pill red';
+
+    if (data.ok) {
+      setStatus('ok', `Codex CLI 成功 · ${((data.durationMs || 0) / 1000).toFixed(2)}s`);
+      addHistory({
+        time: new Date().toLocaleTimeString(),
+        model: model || 'codex-cli',
+        endpoint: 'codex-cli',
+        question: prompt.slice(0, 60),
+        status: 'ok',
+        answer: (data.agentOutput || data.stdout || '').slice(0, 100),
+      });
+    } else {
+      setStatus('err', data.status === 'server_missing_codex_cli' ? '未安装 Codex CLI' : 'Codex CLI 失败');
+      addHistory({
+        time: new Date().toLocaleTimeString(),
+        model: model || 'codex-cli',
+        endpoint: 'codex-cli',
+        question: prompt.slice(0, 60),
+        status: 'err',
+        answer: (data.stderr || data.message || '').slice(0, 100),
+      });
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      setStatus('ok', '已停止');
+    } else {
+      setStatus('err', '请求失败');
+      document.getElementById('resp-body').innerHTML = `<div class="error-block">${escapeHtml(err.message || String(err))}</div>`;
+    }
+  } finally {
+    isStreaming = false;
+    sendBtn.innerHTML = '<span>▶</span> 发送';
+    sendBtn.style.background = '';
+    abortController = null;
+    if (lastCodexCliResult) {
+      const saved = await persistCodexCliCheckLogToServer(lastCodexCliResult);
+      const st = document.getElementById('status-text');
+      if (saved && st) st.textContent = `${st.textContent} · 已入库`;
+    }
+  }
+}
+
+/** Codex CLI 结果写入 Hub（不含 API Key） */
+async function persistCodexCliCheckLogToServer(data, attempt = 0) {
+  try {
+    const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
+    if (!baseUrl || !data) return false;
+    const modelName = (document.getElementById('model').value || '').trim() || 'codex-cli';
+    const prompt = (document.getElementById('user-message').value || '').trim() || CODEX_CLI_DEFAULT_PROMPT;
+    const ok = !!data.ok;
+    const diag = data.diagnosis || {};
+    let httpStatus = null;
+    if (data.timedOut) httpStatus = 408;
+    else if (data.exitCode === 0) httpStatus = 200;
+    else if (typeof data.exitCode === 'number') httpStatus = 500;
+    const payload = {
+      baseUrl,
+      requestUrl: `${baseUrl}#codex-cli`,
+      model: modelName.slice(0, 120),
+      endpointMode: 'codex-cli',
+      resolvedEndpoint: 'codex_cli',
+      stream: false,
+      viaProxy: false,
+      httpStatus,
+      success: ok,
+      elapsedMs: data.durationMs ?? null,
+      diagnosis: {
+        code: data.status || undefined,
+        summary: diag.note || data.message || undefined,
+      },
+      errorMessage: ok ? null : String(data.stderr || data.message || diag.note || '').slice(0, 4000),
+      compliance: null,
+      responseSnippet: String(data.agentOutput || data.stdout || '').slice(0, 2000),
+    };
+    const res = await fetch('/api/relay-api-check/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    });
+    if (!res.ok) {
+      console.warn('[check] codex cli save log', res.status, await res.text().catch(() => ''));
+      if (attempt < 1) return persistCodexCliCheckLogToServer(data, attempt + 1);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[check] codex cli save log failed', e);
+    if (attempt < 1) return persistCodexCliCheckLogToServer(data, attempt + 1);
+    return false;
+  }
+}
+
 function parseThrownHttpError(message) {
   const m = /^HTTP (\d+):\s*([\s\S]*)$/.exec(message || '');
   if (!m) return null;
@@ -1368,29 +1550,25 @@ function parseThrownHttpError(message) {
 }
 
 // ── State ──
-let currentEndpoint = 'auto';
+let currentEndpoint = 'chat';
 let abortController = null;
 let history = JSON.parse(localStorage.getItem('api_test_history') || '[]');
 let savedConfigs = JSON.parse(localStorage.getItem('api_test_configs') || '[]');
 let activeTab = 'text';
 let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null, streamJsonFallback: false, sseDespiteNonStream: false };
 
-const SCENARIOS = [
-  { id: 'anthropic-stream', name: 'Anthropic · 流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: true, user: '用一句话回复：兼容性检测通过' },
-  { id: 'anthropic-sync', name: 'Anthropic · 非流式', model: 'claude-sonnet-4-6', endpoint: 'anthropic', stream: false, user: '用一句话回复：兼容性检测通过' },
-  { id: 'chat-stream', name: 'OpenAI Chat · 流式', model: 'gpt-5.4', endpoint: 'chat', stream: true, user: '用一句话回复：兼容性检测通过' },
-  { id: 'responses-stream', name: 'OpenAI Responses · 流式', model: 'gpt-5.4', endpoint: 'responses', stream: true, user: '用一句话回复：兼容性检测通过' },
-];
-
 const SPEC_REFS = {
   chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
+  'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
 };
 
 const CLAUDE_CLI_DEFAULT_PROMPT = 'Reply with only: OK';
+const CODEX_CLI_DEFAULT_PROMPT = 'Reply with only: OK';
 let lastClaudeCliResult = null;
+let lastCodexCliResult = null;
 let sawClaudeCodeOnlyHttp = false;
 let isStreaming = false;
 
@@ -1398,7 +1576,7 @@ let isStreaming = false;
 (function restoreInputs() {
   const saved = JSON.parse(localStorage.getItem('api_test_inputs') || '{}');
   if (saved.baseUrl) document.getElementById('base-url').value = saved.baseUrl;
-  if (saved.apiKey && saved.endpoint !== 'claude-cli') document.getElementById('api-key').value = saved.apiKey;
+  if (saved.apiKey && saved.endpoint !== 'claude-cli' && saved.endpoint !== 'codex-cli') document.getElementById('api-key').value = saved.apiKey;
   if (saved.model) document.getElementById('model').value = saved.model;
   if (saved.systemPrompt) document.getElementById('system-prompt').value = saved.systemPrompt;
   if (saved.temperature) document.getElementById('temperature').value = saved.temperature;
@@ -1407,13 +1585,15 @@ let isStreaming = false;
   if (saved.useProxy !== undefined) document.getElementById('proxy-toggle').checked = saved.useProxy;
   if (saved.endpoint) {
     const m = (saved.model || '').trim().toLowerCase();
-    if (saved.endpoint === 'chat' && m.startsWith('gemini')) {
-      setEndpoint('auto');
+    if (saved.endpoint === 'auto') {
+      setEndpoint(detectEndpoint(saved.model || ''));
+    } else if (saved.endpoint === 'chat' && m.startsWith('gemini')) {
+      setEndpoint('responses');
     } else {
       setEndpoint(saved.endpoint);
     }
   } else {
-    setEndpoint('auto');
+    setEndpoint('chat');
   }
 })();
 
@@ -1434,8 +1614,8 @@ function autoSave() {
     useProxy: document.getElementById('proxy-toggle').checked,
     endpoint: currentEndpoint,
   };
-  // Claude CLI 模式不将 API Key 写入 localStorage
-  if (currentEndpoint !== 'claude-cli') {
+  // CLI 模式不将 API Key 写入 localStorage
+  if (currentEndpoint !== 'claude-cli' && currentEndpoint !== 'codex-cli') {
     data.apiKey = document.getElementById('api-key').value;
   }
   localStorage.setItem('api_test_inputs', JSON.stringify(data));
@@ -1485,8 +1665,6 @@ async function apiFetch(url, reqHeaders, body, signal) {
 }
 
 renderModelPresets();
-updateAutoHint();
-renderScenarios();
 renderConfigs();
 renderHistory();
 
@@ -1497,52 +1675,45 @@ document.addEventListener('keydown', e => {
 
 // ── Endpoint ──
 function setEndpoint(ep) {
+  if (ep === 'auto') ep = detectEndpoint(document.getElementById('model').value.trim());
   currentEndpoint = ep;
   document.querySelectorAll('.ep-tab').forEach(t => t.classList.toggle('active', t.dataset.ep === ep));
   const cliHint = document.getElementById('claude-cli-hint');
+  const codexHint = document.getElementById('codex-cli-hint');
   const streamHint = document.getElementById('stream-disabled-hint');
   const streamToggle = document.getElementById('stream-toggle');
   if (cliHint) cliHint.style.display = ep === 'claude-cli' ? 'block' : 'none';
-  if (streamHint) streamHint.style.display = ep === 'claude-cli' ? 'inline' : 'none';
-  if (ep === 'claude-cli') {
+  if (codexHint) codexHint.style.display = ep === 'codex-cli' ? 'block' : 'none';
+  if (streamHint) streamHint.style.display = (ep === 'claude-cli' || ep === 'codex-cli') ? 'inline' : 'none';
+  if (ep === 'claude-cli' || ep === 'codex-cli') {
     streamToggle.checked = false;
     streamToggle.disabled = true;
     const um = document.getElementById('user-message');
-    if (um && !um.value.trim()) um.value = CLAUDE_CLI_DEFAULT_PROMPT;
+    if (um && !um.value.trim()) {
+      um.value = ep === 'codex-cli' ? CODEX_CLI_DEFAULT_PROMPT : CLAUDE_CLI_DEFAULT_PROMPT;
+    }
   } else {
     streamToggle.disabled = false;
   }
-  if (ep === 'auto') updateAutoHint();
   if (typeof autoSave === 'function') autoSave();
 }
 
 function getResolvedEndpoint() {
   if (currentEndpoint === 'claude-cli') return 'claude-cli';
-  const model = document.getElementById('model').value.trim();
-  return currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
+  if (currentEndpoint === 'codex-cli') return 'codex-cli';
+  return currentEndpoint;
 }
 
 function isClaudeCliMode() {
   return currentEndpoint === 'claude-cli';
 }
 
-function renderScenarios() {
-  const el = document.getElementById('scenario-list');
-  if (!el) return;
-  el.innerHTML = SCENARIOS.map(s => `
-    <button type="button" class="scenario-btn" onclick="applyScenario('${s.id}')">${s.name}</button>
-  `).join('');
+function isCodexCliMode() {
+  return currentEndpoint === 'codex-cli';
 }
 
-function applyScenario(id) {
-  const s = SCENARIOS.find(x => x.id === id);
-  if (!s) return;
-  document.getElementById('model').value = s.model;
-  document.getElementById('stream-toggle').checked = s.stream;
-  document.getElementById('user-message').value = s.user;
-  setEndpoint(s.endpoint);
-  renderModelPresets();
-  autoSave();
+function isCliMode() {
+  return isClaudeCliMode() || isCodexCliMode();
 }
 
 // ── Key Visibility ──
@@ -1562,7 +1733,7 @@ function saveCurrentConfig() {
     model: document.getElementById('model').value,
     endpoint: currentEndpoint,
   };
-  if (currentEndpoint === 'claude-cli') {
+  if (currentEndpoint === 'claude-cli' || currentEndpoint === 'codex-cli') {
     cfg.apiKeyMasked = maskKeyForDisplay(document.getElementById('api-key').value);
   } else {
     cfg.apiKey = document.getElementById('api-key').value;
@@ -1610,6 +1781,7 @@ function renderConfigs(activeId) {
 async function sendRequest() {
   if (isStreaming) { abortController?.abort(); return; }
   if (isClaudeCliMode()) return sendClaudeCliRequest();
+  if (isCodexCliMode()) return sendCodexCliRequest();
 
   const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
@@ -1651,7 +1823,7 @@ async function sendRequest() {
   lastResponse.elapsed = null;
 
   // Build request body
-  const resolvedEndpoint = currentEndpoint === 'auto' ? detectEndpoint(model) : currentEndpoint;
+  const resolvedEndpoint = getResolvedEndpoint();
   let url, body, reqHeaders;
   if (resolvedEndpoint === 'chat') {
     url = `${baseUrl}/v1/chat/completions`;
@@ -1936,7 +2108,7 @@ async function sendRequest() {
     sendBtn.innerHTML = '<span>▶</span> 发送';
     sendBtn.style.background = '';
     abortController = null;
-    if (logOutcome !== null && lastResponse.request && !isClaudeCliMode()) {
+    if (logOutcome !== null && lastResponse.request && !isCliMode()) {
       const saved = await persistCheckLogToServer(logOutcome);
       const st = document.getElementById('status-text');
       if (saved && st) st.textContent = `${st.textContent} · 已入库`;
@@ -2016,7 +2188,7 @@ function runComplianceCheck() {
     else add('auth', '鉴权头 (Bearer)', 'fail', '缺少 Authorization: Bearer');
   }
 
-  if (currentEndpoint !== 'auto' && currentEndpoint !== ep) {
+  if (currentEndpoint !== ep) {
     add('endpoint-mode', '端点模式', 'warn', `手动选了 ${currentEndpoint}，按模型推荐应为 ${ep}`);
   }
 
@@ -2149,11 +2321,15 @@ function showTab(tab) {
   if (tab === 'text') {
     if (lastClaudeCliResult && lastResponse.request?.type === 'claude_cli') {
       body.innerHTML = renderClaudeCliResultHtml(lastClaudeCliResult);
+    } else if (lastCodexCliResult && lastResponse.request?.type === 'codex_cli') {
+      body.innerHTML = renderCodexCliResultHtml(lastCodexCliResult);
     } else {
       body.innerHTML = lastResponse.text ? `<div class="resp-text">${escapeHtml(lastResponse.text)}</div>` : '<div class="resp-placeholder">发送请求后，响应将显示在此处</div>';
     }
   } else if (tab === 'response') {
     if (lastResponse.request?.type === 'claude_cli' && lastResponse.responseDetail) {
+      body.innerHTML = `<div class="resp-json">${highlightJson(JSON.stringify(lastResponse.responseDetail, null, 2))}</div>`;
+    } else if (lastResponse.request?.type === 'codex_cli' && lastResponse.responseDetail) {
       body.innerHTML = `<div class="resp-json">${highlightJson(JSON.stringify(lastResponse.responseDetail, null, 2))}</div>`;
     } else {
       const detail = buildResponseDetail();
@@ -2167,6 +2343,8 @@ function showTab(tab) {
   } else if (tab === 'compliance') {
     if (lastResponse.request?.type === 'claude_cli' && lastClaudeCliResult) {
       body.innerHTML = renderClaudeCliResultHtml(lastClaudeCliResult);
+    } else if (lastResponse.request?.type === 'codex_cli' && lastCodexCliResult) {
+      body.innerHTML = renderCodexCliResultHtml(lastCodexCliResult);
     } else {
       if (!lastResponse.compliance && lastResponse.request) lastResponse.compliance = runComplianceCheck();
       body.innerHTML = renderComplianceHtml(lastResponse.compliance);
@@ -2196,7 +2374,7 @@ async function persistCheckLogToServer(overallOk, attempt = 0) {
       baseUrl,
       requestUrl: String(req.url || baseUrl).slice(0, 2000),
       model: modelName.slice(0, 120),
-      endpointMode: req.endpointMode || currentEndpoint || 'auto',
+      endpointMode: req.endpointMode || currentEndpoint || 'chat',
       resolvedEndpoint: resolved,
       stream: !!(req.body && req.body.stream),
       viaProxy: !!req.viaProxy,
@@ -2287,7 +2465,7 @@ function renderRequestTabHtml() {
     return '<div class="resp-placeholder">暂无请求信息</div>';
   }
   const req = lastResponse.request;
-  if (req.type === 'claude_cli') {
+  if (req.type === 'claude_cli' || req.type === 'codex_cli') {
     return `<div class="resp-json">${highlightJson(JSON.stringify(req, null, 2))}</div>`;
   }
   const proxyHint = req.viaProxy
@@ -2306,7 +2484,7 @@ function shellSingleQuote(str) {
 }
 
 function buildCurlFromRequest(req) {
-  if (!req || req.type === 'claude_cli' || !req.url) return '';
+  if (!req || req.type === 'claude_cli' || req.type === 'codex_cli' || !req.url) return '';
   const apiKey = document.getElementById('api-key').value.trim();
   const headers = { ...(req.headers || {}) };
 
@@ -2329,7 +2507,7 @@ function buildCurlFromRequest(req) {
 
 function copyRequestAsCurl() {
   const req = lastResponse.request;
-  if (!req || req.type === 'claude_cli') {
+  if (!req || req.type === 'claude_cli' || req.type === 'codex_cli') {
     alert('当前请求不支持生成 curl');
     return;
   }

@@ -24,6 +24,11 @@ from claude_cli_test import (
     run_claude_cli_test,
     validate_base_url_ssrf,
 )
+from codex_cli_test import (
+    CodexCliTestRequest,
+    check_rate_limit as check_codex_rate_limit,
+    run_codex_cli_test,
+)
 
 ALLOWED_ORIGINS = [
     o.strip()
@@ -195,6 +200,30 @@ async def test_claude_cli(request: Request, payload: ClaudeCliTestRequest) -> di
 
     # 切勿记录 payload.apiKey
     return await run_claude_cli_test(
+        base_url=base_url,
+        api_key=payload.apiKey,
+        model=model,
+        prompt=prompt,
+        timeout_ms=payload.timeoutMs,
+    )
+
+
+@app.post("/api/test-codex-cli")
+async def test_codex_cli(request: Request, payload: CodexCliTestRequest) -> dict:
+    """
+    通过子进程执行 `codex exec`（非 shell），注入 OPENAI_API_KEY 与 openai_base_url。
+    用于验证仅 Codex CLI 可使用的 Key；不记录、不日志 apiKey。
+    """
+    ip = client_ip(request)
+    check_codex_rate_limit(ip)
+
+    base_url = normalize_base_url(payload.baseUrl)
+    validate_base_url_ssrf(base_url, _resolve_host_ips)
+
+    prompt = (payload.prompt or "").strip() or "Reply with only: OK"
+    model = (payload.model or "").strip() or None
+
+    return await run_codex_cli_test(
         base_url=base_url,
         api_key=payload.apiKey,
         model=model,

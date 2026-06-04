@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py claude_cli_test.py ./
+COPY main.py claude_cli_test.py codex_cli_test.py ./
 COPY auto_scan ./auto_scan
 
 EXPOSE 8090
