@@ -1007,6 +1007,19 @@ function diagnoseApiIssue(ctx) {
   }
 
   if (status === 401 || status === 403 || /未登录|invalid.*api.*key|incorrect api key|unauthorized|authentication|invalid.*token/i.test(apiMsg + body)) {
+    const cfBlocked = /cloudflare|you have been blocked|attention required/i.test(body);
+    if (cfBlocked && (status === 403 || ct.includes('text/html'))) {
+      return {
+        code: 'cloudflare_blocked',
+        title: 'Cloudflare / WAF 拦截',
+        summary: '检测服务器出口 IP 被中转站 Cloudflare 拦截（非 API Key 问题）',
+        hints: [
+          '经服务端代理访问时，上游看到的是检测站 VPS 的 IP，可能被 WAF 封禁。',
+          '若已部署 WARP 出口仍失败，请稍后重试或取消「服务端代理」从本机直连。',
+          '本机 curl 成功而检测页失败，通常即为此原因。',
+        ],
+      };
+    }
     const hints = [
       '请在中转站控制台复制有效 API Key（通常为 sk- 开头），确认无多余空格或换行。',
       resolvedEndpoint === 'anthropic'

@@ -8,6 +8,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from auto_scan.models import ModelDiscoveryResult
+from proxy_transport import get_with_proxy_retry
 
 FALLBACK_MODELS = [
     "claude-opus-4-7",
@@ -54,7 +55,6 @@ def _models_urls(base_url: str) -> list[str]:
 
 
 async def fetch_models_list(
-    client: httpx.AsyncClient,
     base_url: str,
     api_key: str,
 ) -> tuple[list[ModelDiscoveryResult], str | None]:
@@ -64,25 +64,46 @@ async def fetch_models_list(
         "Content-Type": "application/json",
     }
     for url in _models_urls(base_url):
+        res = None
+        client = None
+        data: dict[str, Any] | None = None
         try:
-            res = await client.get(url, headers=headers, timeout=20.0)
+            res, client, prefix = await get_with_proxy_retry(
+                url,
+                headers=headers,
+                timeout=20.0,
+            )
+            if res.status_code != 200:
+                continue
+            ct = res.headers.get("content-type") or ""
+            if "json" not in ct.lower():
+                continue
+            raw = (prefix or b"") + await res.aread()
+            try:
+                parsed = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            data = parsed
         except httpx.RequestError:
             continue
-        if res.status_code != 200:
-            continue
-        ct = res.headers.get("content-type") or ""
-        if "json" not in ct.lower():
-            continue
-        try:
-            data = res.json()
-        except json.JSONDecodeError:
+        finally:
+            if res is not None:
+                try:
+                    await res.aclose()
+                except Exception:
+                    pass
+            if client is not None:
+                await client.aclose()
+        if data is None:
             continue
         ids: list[str] = []
-        if isinstance(data, dict) and isinstance(data.get("data"), list):
+        if isinstance(data.get("data"), list):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("id"):
                     ids.append(str(item["id"]))
-        elif isinstance(data, dict) and isinstance(data.get("models"), list):
+        elif isinstance(data.get("models"), list):
             for item in data["models"]:
                 if isinstance(item, str):
                     ids.append(item)

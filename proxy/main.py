@@ -15,6 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from proxy_transport import post_with_proxy_retry
+
 from auto_scan.routes import router as auto_scan_router
 from claude_cli_test import (
     ClaudeCliTestRequest,
@@ -247,18 +249,15 @@ async def proxy(request: Request, payload: ProxyRequest) -> Response:
     )
 
     timeout = httpx.Timeout(connect=30.0, read=900.0, write=60.0, pool=30.0)
-    client = httpx.AsyncClient(timeout=timeout)
 
     try:
-        req = client.build_request(
-            "POST",
+        upstream, client, prefix = await post_with_proxy_retry(
             target,
             headers=forward_headers,
             content=body_bytes,
+            timeout=timeout,
         )
-        upstream = await client.send(req, stream=True)
     except httpx.RequestError as exc:
-        await client.aclose()
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     content_type = upstream.headers.get("content-type") or ""
@@ -267,7 +266,8 @@ async def proxy(request: Request, payload: ProxyRequest) -> Response:
     # 非 SSE：缓冲整包再返回，避免浏览器 fetch().json() 读 StreamingResponse 时出现 Failed to fetch
     if "text/event-stream" not in content_type:
         try:
-            body = await upstream.aread()
+            body = prefix or b""
+            body += await upstream.aread()
         finally:
             await upstream.aclose()
             await client.aclose()
@@ -282,6 +282,8 @@ async def proxy(request: Request, payload: ProxyRequest) -> Response:
 
     async def stream_body():
         try:
+            if prefix:
+                yield prefix
             async for chunk in upstream.aiter_bytes():
                 yield chunk
         finally:

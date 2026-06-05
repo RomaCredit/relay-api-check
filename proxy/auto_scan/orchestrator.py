@@ -130,8 +130,7 @@ async def run_auto_scan(
         meta["baseUrl"] = base_url
 
         emit(StepKind.DISCOVERY, "模型发现", "started")
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            models, models_url = await fetch_models_list(client, base_url, rec.api_key)
+        models, models_url = await fetch_models_list(base_url, rec.api_key)
         report["models"] = [m.to_dict() for m in models]
         if models_url:
             meta["modelsUrl"] = models_url
@@ -149,36 +148,34 @@ async def run_auto_scan(
         protocols_out: dict[str, Any] = {}
         stream_modes = [False] if rec.profile == "quick" else [False, True]
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            for ep, model in representatives.items():
-                protocols_out[ep] = {}
-                for stream in stream_modes:
-                    mode_key = "stream" if stream else "sync"
-                    emit(
-                        StepKind.PROTOCOL,
-                        f"{ep} · {mode_key}",
-                        "started",
-                        model,
-                    )
-                    cell = await run_protocol_probe(
-                        client,
-                        base_url=base_url,
-                        api_key=rec.api_key,
-                        endpoint=ep,
-                        model=model,
-                        stream=stream,
-                        validate_url=validate_url,
-                    )
-                    protocols_out[ep][mode_key] = cell.to_dict()
-                    if cell.diagnosis_code == "claude_code_only":
-                        claude_code_only = True
-                    emit(
-                        StepKind.PROTOCOL,
-                        f"{ep} · {mode_key}",
-                        "finished",
-                        cell.status,
-                    )
-                    await asyncio.sleep(STEP_SLEEP_SEC)
+        for ep, model in representatives.items():
+            protocols_out[ep] = {}
+            for stream in stream_modes:
+                mode_key = "stream" if stream else "sync"
+                emit(
+                    StepKind.PROTOCOL,
+                    f"{ep} · {mode_key}",
+                    "started",
+                    model,
+                )
+                cell = await run_protocol_probe(
+                    base_url=base_url,
+                    api_key=rec.api_key,
+                    endpoint=ep,
+                    model=model,
+                    stream=stream,
+                    validate_url=validate_url,
+                )
+                protocols_out[ep][mode_key] = cell.to_dict()
+                if cell.diagnosis_code == "claude_code_only":
+                    claude_code_only = True
+                emit(
+                    StepKind.PROTOCOL,
+                    f"{ep} · {mode_key}",
+                    "finished",
+                    cell.status,
+                )
+                await asyncio.sleep(STEP_SLEEP_SEC)
 
         report["protocols"] = protocols_out
         emit(StepKind.PROTOCOL, "协议矩阵", "finished")

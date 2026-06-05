@@ -10,6 +10,7 @@ import httpx
 from auto_scan.compliance import run_compliance, summarize_checks
 from auto_scan.discovery import build_request_url
 from auto_scan.models import ProtocolCellResult
+from proxy_transport import post_with_proxy_retry
 
 PROBE_USER = "用一句话回复：兼容性检测通过"
 
@@ -63,7 +64,6 @@ def build_request(
 
 
 async def run_protocol_probe(
-    client: httpx.AsyncClient,
     *,
     base_url: str,
     api_key: str,
@@ -86,8 +86,10 @@ async def run_protocol_probe(
     )
     started = time.perf_counter()
     raw = ""
+    client: httpx.AsyncClient | None = None
+    res = None
     try:
-        res = await client.post(
+        res, client, prefix = await post_with_proxy_retry(
             url,
             headers=headers,
             content=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -95,7 +97,9 @@ async def run_protocol_probe(
         )
         cell.http_status = res.status_code
         cell.content_type = res.headers.get("content-type")
-        raw = res.text
+        raw_bytes = prefix or b""
+        raw_bytes += await res.aread()
+        raw = raw_bytes.decode("utf-8", errors="replace")
         cell.elapsed_ms = int((time.perf_counter() - started) * 1000)
         cell.success = res.status_code == 200
         if not cell.success:
@@ -105,6 +109,14 @@ async def run_protocol_probe(
         cell.success = False
         cell.error_message = str(exc)
         cell.http_status = None
+    finally:
+        if res is not None:
+            try:
+                await res.aclose()
+            except Exception:
+                pass
+        if client is not None:
+            await client.aclose()
 
     cell.response_snippet = (raw or "")[:400]
     cell.checks = run_compliance(
