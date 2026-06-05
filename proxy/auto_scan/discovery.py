@@ -12,12 +12,13 @@ from auto_scan.models import ModelDiscoveryResult
 FALLBACK_MODELS = [
     "claude-opus-4-7",
     "claude-sonnet-4-6",
+    "claude-haiku-4-5",
     "gpt-5.5",
     "gpt-5.4",
 ]
 
 REPRESENTATIVE_BY_FAMILY = {
-    "anthropic": ["claude-sonnet-4-6", "claude-opus-4-7"],
+    "anthropic": ["claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-7"],
     "responses": ["gpt-5.4", "gpt-5.5"],
     "chat": ["gpt-5.4"],
 }
