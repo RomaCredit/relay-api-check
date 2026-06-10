@@ -154,13 +154,32 @@ def build_diagnosis(
         )
         likely_code_only = True
         key_valid = None
+    elif re.search(r"cloudflare|attention required|you have been blocked", combined):
+        note_parts.append(
+            "检测站 VPS 直连 Base URL 时被 Cloudflare/WAF 拦截（非 Key 无效）。"
+            "Claude CLI 子进程不走服务端 WARP 代理；请改用 Anthropic Messages + 服务端代理，"
+            "或换无 Cloudflare 的 Base URL（RomaAPI 请用 https://api.romaapi.com）。"
+        )
+        return {
+            "keyValid": None,
+            "realClaudeClientAccepted": False,
+            "likelyClaudeCodeOnlyKey": likely_code_only,
+            "code": "cloudflare_blocked",
+            "note": " ".join(note_parts),
+        }
     elif re.search(r"rate limit|limit exceeded|quota", combined):
         note_parts.append("Key 或上游账号可能触发限额。")
     elif re.search(r"unauthorized|invalid api key|authentication|401", combined):
         note_parts.append("Key 无效或认证方式不匹配。")
         key_valid = False
-    elif re.search(r"model.*not found|unsupported model|not found.*model", combined):
-        note_parts.append("模型名可能不受支持，请检查 Model。")
+    elif re.search(
+        r"model.*not found|unsupported model|not found.*model|issue with the selected model",
+        combined,
+    ):
+        note_parts.append(
+            "模型名可能不受支持，或 Base URL 不正确（RomaAPI 须为 https://api.romaapi.com，"
+            "不要用 https://romaapi.com）。"
+        )
     else:
         note_parts.append(
             "Claude CLI 调用失败，请检查 Base URL、Key、Model 或服务端 claude 命令是否可用。"

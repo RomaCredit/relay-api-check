@@ -37,3 +37,15 @@ def test_diagnosis_claude_code_only_message():
     )
     assert d["realClaudeClientAccepted"] is False
     assert "Claude CLI" in d["note"]
+
+
+def test_diagnosis_cloudflare_blocked():
+    d = build_diagnosis(
+        exit_code=1,
+        stdout="Failed to authenticate. API Error: Attention Required! | Cloudflare\n",
+        stderr="",
+        timed_out=False,
+    )
+    assert d["code"] == "cloudflare_blocked"
+    assert "Cloudflare" in d["note"]
+    assert "api.romaapi.com" in d["note"]

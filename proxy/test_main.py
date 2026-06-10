@@ -5,6 +5,8 @@ from main import _relay_api_path_allowed
 def test_root_v1_paths():
     assert _relay_api_path_allowed("/v1/chat/completions")
     assert _relay_api_path_allowed("/api/v1/responses")
+    assert _relay_api_path_allowed("/v1/images/generations")
+    assert _relay_api_path_allowed("/v1/images/edits")
 
 
 def test_group_prefix_paths():

@@ -65,6 +65,8 @@ _ALLOWED_RELAY_SUFFIXES = (
     "responses",
     "messages",
     "models",
+    "images/generations",
+    "images/edits",
 )
 
 
