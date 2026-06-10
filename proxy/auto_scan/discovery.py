@@ -11,17 +11,26 @@ from auto_scan.models import ModelDiscoveryResult
 from proxy_transport import get_with_proxy_retry
 
 FALLBACK_MODELS = [
+    "claude-fable-5",
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-sonnet-4-6",
     "claude-haiku-4-5",
     "gpt-5.5",
     "gpt-5.4",
+    "MiniMax-M3",
 ]
 
 REPRESENTATIVE_BY_FAMILY = {
-    "anthropic": ["claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-7"],
+    "anthropic": [
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "claude-opus-4-7",
+    ],
     "responses": ["gpt-5.4", "gpt-5.5"],
-    "chat": ["gpt-5.4"],
+    "chat": ["gpt-5.4", "MiniMax-M3"],
 }
 
 
