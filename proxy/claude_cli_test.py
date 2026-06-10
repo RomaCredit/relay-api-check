@@ -24,8 +24,8 @@ DEFAULT_PROMPT = "Reply with only: OK"
 MAX_PROMPT_LEN = 1000
 MAX_BASE_URL_LEN = 300
 MAX_MODEL_LEN = 100
-MAX_TIMEOUT_MS = 60_000
-DEFAULT_TIMEOUT_MS = 30_000
+MAX_TIMEOUT_MS = 300_000
+DEFAULT_TIMEOUT_MS = 120_000
 
 
 class ClaudeCliTestRequest(BaseModel):
@@ -127,11 +127,15 @@ def build_diagnosis(
     likely_code_only: bool | None = None
 
     if timed_out:
-        note_parts.append("执行超时，已终止子进程。")
+        note_parts.append(
+            "执行超时，已终止子进程。Claude CLI 子进程有等待上限；"
+            "长代码/长回复任务请增大「CLI 超时」或改用 Anthropic Messages 端点。"
+        )
         return {
             "keyValid": None,
             "realClaudeClientAccepted": False,
             "likelyClaudeCodeOnlyKey": None,
+            "code": "cli_timeout",
             "note": " ".join(note_parts) or "Claude CLI 调用超时。",
         }
 

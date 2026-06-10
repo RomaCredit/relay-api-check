@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260610-image-upload">
+<meta name="check-build" content="20260610-cli-timeout">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -303,6 +303,7 @@
         环境变量：<code>ANTHROPIC_BASE_URL</code>、<code>ANTHROPIC_AUTH_TOKEN</code>、可选 <code>ANTHROPIC_MODEL</code>。<br>
         <span style="color:var(--yellow)">Claude CLI 由检测站 VPS 直连 Base URL，不走「服务端代理 / WARP」。</span> 若中转站前有 Cloudflare，HTTP 模式可能成功而 CLI 模式会报 <code>Attention Required | Cloudflare</code>。<br>
         RomaAPI 请填 <code>https://api.romaapi.com</code>（不要用 <code>romaapi.com</code>）。<br>
+        <span style="color:var(--yellow)">默认 CLI 超时 120s</span>；仅验证 Key 可用时请用短 prompt，勿发长代码生成任务。<br>
         图生图支持<strong>本地上传</strong>参考图/遮罩（经 data URL 提交，单张建议 &lt; 10MB）。<br>
         <span style="color:var(--yellow)">流式 (Stream) 在此模式下无效。</span> 服务器须已安装 <code>claude</code> 命令（VPS/Docker，非 Serverless）。
       </div>
@@ -349,6 +350,16 @@
         </label>
       </div>
       </div>
+      </div>
+      <div id="cli-params" style="display:none">
+        <div class="param-field">
+          <div class="param-field-header">
+            <label for="cli-timeout-sec" class="param-label">CLI 超时</label>
+            <span class="param-note">秒 · 最长 300</span>
+          </div>
+          <input id="cli-timeout-sec" type="number" min="10" max="300" step="10" value="120" />
+          <p class="param-note" style="margin-top:6px;line-height:1.4">连通性测试用短 prompt（如 <code>Reply with only: OK</code>）+ 30s 即可；写代码等长任务请增大超时。</p>
+        </div>
       </div>
       <div id="image-params" style="display:none">
         <div class="params-grid">
@@ -1423,6 +1434,8 @@ function renderClaudeCliResultHtml(data) {
     bannerText = '⚠️ 服务端未安装 Claude CLI<br>请先在服务器执行 <code>claude --version</code> 确认可用（需 VPS/Docker，非 Serverless）。';
   } else if (sawClaudeCodeOnlyHttp) {
     bannerText = '⚠️ 该 Key 可能是 Claude Code 专用 Key，但当前 Claude CLI 测试仍失败。请检查 Base URL、Model 或服务端 claude 安装。';
+  } else if (diag.code === 'cli_timeout' || data.timedOut) {
+    bannerText = '⏱️ Claude CLI 执行超时<br>长代码/长回复会超过等待上限。连通性测试请用短 prompt（<code>Reply with only: OK</code>）；长任务请增大左侧「CLI 超时」或改用 <strong>Anthropic Messages</strong>。';
   } else if (diag.code === 'cloudflare_blocked' || /cloudflare|attention required/i.test((data.stdout || '') + (data.stderr || ''))) {
     bannerText = '❌ Cloudflare / WAF 拦截（非 Key 无效）<br>Claude CLI 由检测站 VPS <strong>直连</strong> Base URL，<strong>不经过</strong>「服务端代理 / WARP」。带 Cloudflare 的中转站请改用 <strong>Anthropic Messages + 服务端代理</strong>。RomaAPI 请确认 Base URL 为 <code>https://api.romaapi.com</code>。';
   } else if (/issue with the selected model/i.test(data.stdout || '')) {
@@ -1482,7 +1495,7 @@ async function sendClaudeCliRequest() {
         apiKey,
         model: model || undefined,
         prompt,
-        timeoutMs: 30000,
+        timeoutMs: readCliTimeoutMs(),
       }),
       signal: abortController.signal,
     });
@@ -1676,7 +1689,7 @@ async function sendCodexCliRequest() {
         apiKey,
         model: model || undefined,
         prompt,
-        timeoutMs: 30000,
+        timeoutMs: readCliTimeoutMs(),
       }),
       signal: abortController.signal,
     });
@@ -1912,21 +1925,32 @@ function renderImageResponseHtml(images, summaryText) {
     <div class="image-preview-grid">${cards || '<div class="resp-placeholder">无图片数据</div>'}</div>`;
 }
 
-function updateImageModeUi(ep = currentEndpoint) {
+function updateEndpointParamsUi(ep = currentEndpoint) {
   const imageMode = isImageEndpoint(ep);
+  const cliMode = isCliMode();
   const chatParams = document.getElementById('chat-params');
   const imageParams = document.getElementById('image-params');
-  if (chatParams) chatParams.style.display = imageMode ? 'none' : '';
+  const cliParams = document.getElementById('cli-params');
+  if (chatParams) chatParams.style.display = (imageMode || cliMode) ? 'none' : '';
   if (imageParams) imageParams.style.display = imageMode ? 'block' : 'none';
+  if (cliParams) cliParams.style.display = cliMode ? 'block' : 'none';
   const editFields = document.getElementById('image-edit-fields');
   if (editFields) editFields.style.display = ep === 'image-edit' ? 'block' : 'none';
   const sysBlock = document.getElementById('system-prompt-block');
-  if (sysBlock) sysBlock.style.display = imageMode ? 'none' : '';
+  if (sysBlock) sysBlock.style.display = (imageMode || cliMode) ? 'none' : '';
   const label = document.getElementById('user-message-label');
   const um = document.getElementById('user-message');
-  if (label) label.textContent = imageMode ? 'Prompt (图像描述)' : 'User Message';
+  if (label) {
+    label.textContent = imageMode ? 'Prompt (图像描述)' : (cliMode ? 'Prompt (CLI)' : 'User Message');
+  }
   if (um && imageMode && !um.value.trim()) um.placeholder = '描述要生成的图像，例如：a corgi astronaut on the moon';
-  else if (um) um.placeholder = imageMode ? '描述要生成的图像…' : '在这里输入你的问题...';
+  else if (um) um.placeholder = imageMode ? '描述要生成的图像…' : (cliMode ? '短 prompt 测连通性，如 Reply with only: OK' : '在这里输入你的问题...');
+}
+
+function readCliTimeoutMs() {
+  const sec = parseInt(document.getElementById('cli-timeout-sec')?.value, 10);
+  const clamped = Number.isFinite(sec) ? Math.min(300, Math.max(10, sec)) : 120;
+  return clamped * 1000;
 }
 
 const SPEC_REFS = {
@@ -1962,6 +1986,7 @@ let isStreaming = false;
   if (saved.imageResolution) document.getElementById('image-resolution').value = saved.imageResolution;
   if (saved.imageRefUrl) document.getElementById('image-ref-url').value = saved.imageRefUrl;
   if (saved.imageMaskUrl) document.getElementById('image-mask-url').value = saved.imageMaskUrl;
+  if (saved.cliTimeoutSec) document.getElementById('cli-timeout-sec').value = saved.cliTimeoutSec;
   if (saved.endpoint) {
     const m = (saved.model || '').trim().toLowerCase();
     if (saved.endpoint === 'auto') {
@@ -1974,7 +1999,7 @@ let isStreaming = false;
   } else {
     setEndpoint('chat');
   }
-  updateImageModeUi();
+  updateEndpointParamsUi();
 })();
 
 function maskKeyForDisplay(key) {
@@ -1997,6 +2022,7 @@ function autoSave() {
     imageResolution: document.getElementById('image-resolution')?.value,
     imageRefUrl: document.getElementById('image-ref-url')?.value,
     imageMaskUrl: document.getElementById('image-mask-url')?.value,
+    cliTimeoutSec: document.getElementById('cli-timeout-sec')?.value,
   };
   // CLI 模式不将 API Key 写入 localStorage
   if (currentEndpoint !== 'claude-cli' && currentEndpoint !== 'codex-cli') {
@@ -2005,7 +2031,7 @@ function autoSave() {
   localStorage.setItem('api_test_inputs', JSON.stringify(data));
 }
 
-['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-ref-url','image-mask-url'].forEach(id => {
+['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-ref-url','image-mask-url','cli-timeout-sec'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', autoSave);
   if (el && el.tagName === 'SELECT') el.addEventListener('change', autoSave);
@@ -2094,7 +2120,7 @@ function setEndpoint(ep, opts = {}) {
   } else {
     streamToggle.disabled = false;
   }
-  updateImageModeUi(ep);
+  updateEndpointParamsUi(ep);
   if (!opts.skipModelReconcile && endpointHasModelRestrictions(ep)) {
     const modelEl = document.getElementById('model');
     const model = modelEl.value.trim();

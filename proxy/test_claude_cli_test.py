@@ -49,3 +49,9 @@ def test_diagnosis_cloudflare_blocked():
     assert d["code"] == "cloudflare_blocked"
     assert "Cloudflare" in d["note"]
     assert "api.romaapi.com" in d["note"]
+
+
+def test_diagnosis_cli_timeout():
+    d = build_diagnosis(exit_code=None, stdout="", stderr="", timed_out=True)
+    assert d["code"] == "cli_timeout"
+    assert "超时" in d["note"]
