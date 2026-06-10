@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260610-gpt-image-2">
+<meta name="check-build" content="20260610-fix-model-presets">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1421,7 +1421,6 @@ function renderClaudeCliResultHtml(data) {
   } else {
     bannerText = '❌ Claude CLI 真实客户端调用失败<br>请检查 Base URL、Key、Model、服务端 Claude CLI 安装状态，或中转站是否限制了更严格的客户端指纹。';
   }
-  const diag = data.diagnosis || {};
   return `<div class="cli-card">
     <div class="cli-banner ${bannerClass}">${bannerText}</div>
     <h3>Claude CLI 诊断</h3>
