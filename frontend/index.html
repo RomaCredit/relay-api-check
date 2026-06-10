@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260610-fix-model-presets">
+<meta name="check-build" content="20260610-image-upload">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -141,6 +141,10 @@
   .image-preview-card { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
   .image-preview-card img { max-width: 100%; border-radius: 6px; display: block; margin: 0 auto; }
   .image-preview-meta { font-size: 11px; color: var(--text-dim); margin-top: 8px; word-break: break-all; }
+  .image-upload-preview { margin-top: 8px; }
+  .image-upload-preview img { max-width: 100%; max-height: 120px; border-radius: 6px; border: 1px solid var(--border); display: block; }
+  .image-upload-preview span { display: block; font-size: 10px; color: var(--text-dimmer); margin-top: 4px; }
+  input[type="file"] { font-size: 11px; color: var(--text-dim); width: 100%; }
 
   /* Streaming cursor */
   .cursor { display: inline-block; width: 2px; height: 14px; background: var(--accent); animation: blink .8s infinite; vertical-align: text-bottom; margin-left: 1px; }
@@ -299,6 +303,7 @@
         环境变量：<code>ANTHROPIC_BASE_URL</code>、<code>ANTHROPIC_AUTH_TOKEN</code>、可选 <code>ANTHROPIC_MODEL</code>。<br>
         <span style="color:var(--yellow)">Claude CLI 由检测站 VPS 直连 Base URL，不走「服务端代理 / WARP」。</span> 若中转站前有 Cloudflare，HTTP 模式可能成功而 CLI 模式会报 <code>Attention Required | Cloudflare</code>。<br>
         RomaAPI 请填 <code>https://api.romaapi.com</code>（不要用 <code>romaapi.com</code>）。<br>
+        图生图支持<strong>本地上传</strong>参考图/遮罩（经 data URL 提交，单张建议 &lt; 10MB）。<br>
         <span style="color:var(--yellow)">流式 (Stream) 在此模式下无效。</span> 服务器须已安装 <code>claude</code> 命令（VPS/Docker，非 Serverless）。
       </div>
       <div id="codex-cli-hint" class="ep-hint" style="display:none">
@@ -311,7 +316,7 @@
         <strong>gpt-image-2 图像 API</strong><br>
         仅支持模型 <code>gpt-image-2</code>。RomaAPI 同步路径：<code>POST /v1/images/generations</code>（文生图）、<code>POST /v1/images/edits</code>（图生图，JSON 体传 <code>image_urls</code>）。<br>
         同步请求网关内轮询，文生图最长约 120s、编辑约 180s；超时请改用异步 API（<code>/async</code> + 任务查询）。<br>
-        Base URL 示例：<code>https://api.romaapi.com</code>。
+        Base URL 示例：<code>https://api.romaapi.com</code>。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
     </div>
 
@@ -377,10 +382,14 @@
           </div>
         </div>
         <div id="image-edit-fields" style="display:none;margin-top:10px">
-          <label for="image-ref-url">参考图 URL <span style="color:var(--text-dimmer)">(image_urls，必填)</span></label>
+          <label for="image-ref-url">参考图 <span style="color:var(--text-dimmer)">(URL 或本地上传，二选一)</span></label>
           <input id="image-ref-url" type="url" placeholder="https://example.com/photo.jpg" />
-          <label for="image-mask-url">遮罩 URL <span style="color:var(--text-dimmer)">(mask_url，可选)</span></label>
+          <input id="image-ref-file" type="file" accept="image/jpeg,image/png,image/webp,image/gif" style="margin-top:6px" />
+          <div id="image-ref-preview" class="image-upload-preview" style="display:none"></div>
+          <label for="image-mask-url" style="margin-top:10px">遮罩 <span style="color:var(--text-dimmer)">(URL 或本地上传，可选 · PNG/WebP 透明)</span></label>
           <input id="image-mask-url" type="url" placeholder="https://example.com/mask.png" />
+          <input id="image-mask-file" type="file" accept="image/png,image/webp" style="margin-top:6px" />
+          <div id="image-mask-preview" class="image-upload-preview" style="display:none"></div>
         </div>
       </div>
       <div class="toggle-row" style="margin-top:8px">
@@ -1810,17 +1819,79 @@ let savedConfigs = JSON.parse(localStorage.getItem('api_test_configs') || '[]');
 let activeTab = 'text';
 let lastResponse = { text: '', json: null, request: null, responseDetail: null, compliance: null, diagnosis: null, apiFailure: null, error: null, elapsed: null, tokens: null, httpStatus: null, contentType: null, responseHeaders: null, streamJsonFallback: false, sseDespiteNonStream: false, images: null };
 
-function buildImageRequestBody(ep, model, prompt) {
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function updateImageFilePreview(inputId, previewId) {
+  const input = document.getElementById(inputId);
+  const preview = document.getElementById(previewId);
+  if (!input || !preview) return;
+  const file = input.files?.[0];
+  if (!file) {
+    preview.style.display = 'none';
+    preview.innerHTML = '';
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  preview.style.display = 'block';
+  preview.innerHTML = `<img src="${url}" alt="preview" /><span>${escapeHtml(file.name)} · ${(file.size / 1024).toFixed(1)} KB</span>`;
+}
+
+async function resolveImageEditSources() {
+  const refFile = document.getElementById('image-ref-file')?.files?.[0];
+  const refUrl = document.getElementById('image-ref-url')?.value?.trim();
+  const maskFile = document.getElementById('image-mask-file')?.files?.[0];
+  const maskUrl = document.getElementById('image-mask-url')?.value?.trim();
+  let imageRef = '';
+  if (refFile) {
+    if (refFile.size > 20 * 1024 * 1024) throw new Error('参考图过大（上限 20MB）');
+    imageRef = await readFileAsDataURL(refFile);
+  } else if (refUrl) {
+    imageRef = refUrl;
+  } else {
+    throw new Error('图生图须填写参考图 URL 或选择本地文件');
+  }
+  let maskRef = '';
+  if (maskFile) {
+    if (maskFile.size > 20 * 1024 * 1024) throw new Error('遮罩图过大（上限 20MB）');
+    maskRef = await readFileAsDataURL(maskFile);
+  } else if (maskUrl) {
+    maskRef = maskUrl;
+  }
+  return { imageRef, maskRef, refFromFile: !!refFile, maskFromFile: !!maskFile };
+}
+
+function sanitizeImageBodyForDisplay(body) {
+  if (!body || typeof body !== 'object') return body;
+  const out = { ...body };
+  delete out._uploadMeta;
+  if (Array.isArray(out.image_urls)) {
+    out.image_urls = out.image_urls.map((u) => (
+      typeof u === 'string' && u.startsWith('data:') ? `[uploaded data URL · ${u.length} chars]` : u
+    ));
+  }
+  if (typeof out.mask_url === 'string' && out.mask_url.startsWith('data:')) {
+    out.mask_url = `[uploaded data URL · ${out.mask_url.length} chars]`;
+  }
+  return out;
+}
+
+async function buildImageRequestBody(ep, model, prompt) {
   const size = document.getElementById('image-size')?.value || '1:1';
   const resolution = document.getElementById('image-resolution')?.value?.trim();
   const body = { model, prompt, size, n: 1 };
   if (resolution) body.resolution = resolution;
   if (ep === 'image-edit') {
-    const refUrl = document.getElementById('image-ref-url')?.value?.trim();
-    const maskUrl = document.getElementById('image-mask-url')?.value?.trim();
-    if (!refUrl) throw new Error('图生图须填写参考图 URL (image_urls)');
-    body.image_urls = [refUrl];
-    if (maskUrl) body.mask_url = maskUrl;
+    const { imageRef, maskRef, refFromFile, maskFromFile } = await resolveImageEditSources();
+    body.image_urls = [imageRef];
+    if (maskRef) body.mask_url = maskRef;
+    body._uploadMeta = { refFromFile, maskFromFile };
   }
   return body;
 }
@@ -1863,7 +1934,7 @@ const SPEC_REFS = {
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
   'image-gen': 'POST /v1/images/generations · Authorization: Bearer · body: { model: gpt-image-2, prompt, size?, n?, resolution? }',
-  'image-edit': 'POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[], size?, resolution?, mask_url? }',
+  'image-edit': 'POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[]|上传, size?, resolution?, mask_url? }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
   'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
 };
@@ -1938,6 +2009,14 @@ function autoSave() {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', autoSave);
   if (el && el.tagName === 'SELECT') el.addEventListener('change', autoSave);
+});
+['image-ref-file', 'image-mask-file'].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', () => {
+    updateImageFilePreview('image-ref-file', 'image-ref-preview');
+    updateImageFilePreview('image-mask-file', 'image-mask-preview');
+  });
 });
 document.getElementById('stream-toggle').addEventListener('change', autoSave);
 document.getElementById('proxy-toggle').addEventListener('change', autoSave);
@@ -2179,12 +2258,12 @@ async function sendRequest() {
   let url, body, reqHeaders;
   if (resolvedEndpoint === 'image-gen') {
     url = `${baseUrl}/v1/images/generations`;
-    try { body = buildImageRequestBody('image-gen', model, userMsg); }
+    try { body = await buildImageRequestBody('image-gen', model, userMsg); }
     catch (e) { alert(e.message); isStreaming = false; sendBtn.innerHTML = '<span id="send-icon">▶</span> 发送'; sendBtn.style.background = ''; return; }
     reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   } else if (resolvedEndpoint === 'image-edit') {
     url = `${baseUrl}/v1/images/edits`;
-    try { body = buildImageRequestBody('image-edit', model, userMsg); }
+    try { body = await buildImageRequestBody('image-edit', model, userMsg); }
     catch (e) { alert(e.message); isStreaming = false; sendBtn.innerHTML = '<span id="send-icon">▶</span> 发送'; sendBtn.style.background = ''; return; }
     reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   } else if (resolvedEndpoint === 'chat') {
@@ -2212,6 +2291,7 @@ async function sendRequest() {
   }
 
   const viaProxy = shouldUseProxy(url);
+  if (body?._uploadMeta) delete body._uploadMeta;
   const requestDetail = {
     url,
     viaProxy,
@@ -2219,7 +2299,7 @@ async function sendRequest() {
     resolvedEndpoint,
     method: 'POST',
     headers: { ...reqHeaders, ...(reqHeaders['x-api-key'] ? { 'x-api-key': apiKey.slice(0,8)+'...' } : { 'Authorization': `Bearer ${apiKey.slice(0,8)}...` }) },
-    body,
+    body: sanitizeImageBodyForDisplay(body),
   };
   lastResponse.request = requestDetail;
 
