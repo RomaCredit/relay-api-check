@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260610-minimax-m3-preset">
+<meta name="check-build" content="20260610-params-ui">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -74,9 +74,14 @@
   .icon-btn:hover { border-color: var(--accent); color: var(--accent); }
 
   /* Params row */
-  .params-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .param-group { display: flex; flex-direction: column; }
-  .param-group label { margin-top: 0; }
+  .params-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
+  .param-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .param-field-header { min-height: 2.25rem; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; }
+  .param-field label.param-label { margin: 0; font-size: 12px; line-height: 1.2; color: var(--text-dim); }
+  .param-note { font-size: 10px; line-height: 1.2; color: var(--text-dimmer); }
+  .param-field input { margin-top: 0; }
+  .params-toggles { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+  .params-toggles .toggle-row { margin-top: 0; }
 
   /* Endpoint toggle */
   .endpoint-tabs { display: flex; gap: 4px; margin-top: 2px; }
@@ -168,7 +173,8 @@
   .resize-handle:hover { background: var(--accent); }
 
   .toggle-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
-  .toggle-label { font-size: 12px; color: var(--text-dim); flex: 1; }
+  .toggle-label { font-size: 12px; color: var(--text-dim); flex: 1; line-height: 1.35; }
+  .label-muted { color: var(--text-dimmer); font-size: 10px; }
   .toggle { position: relative; width: 32px; height: 18px; flex-shrink: 0; }
   .toggle input { opacity: 0; width: 0; height: 0; }
   .toggle-slider { position: absolute; inset: 0; background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; cursor: pointer; transition: all .2s; }
@@ -298,16 +304,23 @@
     <!-- Params -->
     <div class="panel-section">
       <div class="section-title">参数</div>
-      <div class="params-row">
-        <div class="param-group">
-          <label>Temperature</label>
-          <input id="temperature" type="number" step="0.1" min="0" max="2" value="0.7" />
+      <div class="params-grid">
+        <div class="param-field">
+          <div class="param-field-header">
+            <label for="temperature" class="param-label">Temperature</label>
+            <span class="param-note">留空则不发送</span>
+          </div>
+          <input id="temperature" type="number" step="0.1" min="0" max="2" value="0.7" placeholder="—" title="留空则请求中不包含 temperature（适用于 Bedrock 等新模型）" />
         </div>
-        <div class="param-group">
-          <label>Max Tokens</label>
+        <div class="param-field">
+          <div class="param-field-header">
+            <label for="max-tokens" class="param-label">Max Tokens</label>
+            <span class="param-note" aria-hidden="true">&nbsp;</span>
+          </div>
           <input id="max-tokens" type="number" step="256" min="1" value="2048" />
         </div>
       </div>
+      <div class="params-toggles">
       <div class="toggle-row" id="stream-toggle-row">
         <span class="toggle-label">流式输出 (Stream) <span id="stream-disabled-hint" style="display:none;color:var(--yellow);font-size:10px">（CLI 模式无效）</span></span>
         <label class="toggle">
@@ -316,11 +329,12 @@
         </label>
       </div>
       <div class="toggle-row">
-        <span class="toggle-label">服务端代理 <span style="color:var(--text-dimmer);font-size:10px">（绕过 CORS）</span></span>
+        <span class="toggle-label">服务端代理 <span class="label-muted">绕过 CORS</span></span>
         <label class="toggle">
           <input type="checkbox" id="proxy-toggle" checked />
           <span class="toggle-slider"></span>
         </label>
+      </div>
       </div>
     </div>
 
@@ -1940,6 +1954,13 @@ function renderConfigs(activeId) {
 }
 
 // ── Send ──
+function readOptionalTemperature() {
+  const raw = document.getElementById('temperature').value.trim();
+  if (raw === '') return null;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) ? n : null;
+}
+
 async function sendRequest() {
   if (isStreaming) { abortController?.abort(); return; }
   if (isClaudeCliMode()) return sendClaudeCliRequest();
@@ -1951,7 +1972,7 @@ async function sendRequest() {
   const model = document.getElementById('model').value.trim();
   const systemPrompt = document.getElementById('system-prompt').value.trim();
   const userMsg = document.getElementById('user-message').value.trim();
-  const temperature = parseFloat(document.getElementById('temperature').value) || 0.7;
+  const temperature = readOptionalTemperature();
   const maxTokens = parseInt(document.getElementById('max-tokens').value) || 2048;
   const stream = document.getElementById('stream-toggle').checked;
 
@@ -1993,17 +2014,20 @@ async function sendRequest() {
     const messages = [];
     if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
     messages.push({ role: 'user', content: userMsg });
-    body = { model, messages, temperature, max_tokens: maxTokens, stream };
+    body = { model, messages, max_tokens: maxTokens, stream };
+    if (temperature != null) body.temperature = temperature;
     reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   } else if (resolvedEndpoint === 'responses') {
     url = `${baseUrl}/v1/responses`;
-    body = { model, input: userMsg, temperature, max_output_tokens: maxTokens, stream };
+    body = { model, input: userMsg, max_output_tokens: maxTokens, stream };
+    if (temperature != null) body.temperature = temperature;
     if (systemPrompt) body.instructions = systemPrompt;
     reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   } else {
     // Anthropic Messages API
     url = `${baseUrl}/v1/messages`;
-    body = { model, max_tokens: maxTokens, messages: [{ role: 'user', content: userMsg }], temperature };
+    body = { model, max_tokens: maxTokens, messages: [{ role: 'user', content: userMsg }] };
+    if (temperature != null) body.temperature = temperature;
     if (systemPrompt) body.system = systemPrompt;
     if (stream) body.stream = true;
     reqHeaders = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' };
@@ -2345,7 +2369,7 @@ function runComplianceCheck() {
     if (h['x-api-key'] && h['anthropic-version']) add('auth', '鉴权头 (Anthropic)', 'pass', 'x-api-key + anthropic-version');
     else add('auth', '鉴权头 (Anthropic)', 'fail', '缺少 x-api-key 或 anthropic-version');
     if (req.body?.temperature != null) add('temp', 'temperature', 'pass', String(req.body.temperature));
-    else add('temp', 'temperature', 'warn', '未发送 temperature（官方支持）');
+    else add('temp', 'temperature', 'pass', '未发送（Bedrock/部分中转站不支持）');
   } else {
     if (req.headers?.Authorization?.startsWith('Bearer')) add('auth', '鉴权头 (Bearer)', 'pass', 'Authorization: Bearer …');
     else add('auth', '鉴权头 (Bearer)', 'fail', '缺少 Authorization: Bearer');
@@ -2706,7 +2730,7 @@ function copyDiagnostics() {
   lines.push(`- 模型: ${req.body?.model || document.getElementById('model').value || '未知'}`);
   if (req.endpointMode) lines.push(`- 端点模式: ${req.endpointMode}${req.resolvedEndpoint ? ` → ${req.resolvedEndpoint}` : ''}`);
   lines.push(`- Stream: ${req.body?.stream === true ? 'true' : req.body?.stream === false ? 'false' : (req.resolvedEndpoint === 'anthropic' && !('stream' in (req.body || {})) ? 'false' : String(req.body?.stream ?? 'false'))}`);
-  lines.push(`- Temperature: ${req.body?.temperature ?? '未知'}`);
+  lines.push(`- Temperature: ${req.body?.temperature ?? '未发送'}`);
   lines.push(`- Max Tokens: ${req.body?.max_tokens ?? req.body?.max_output_tokens ?? '未知'}`);
 
   const userMsg = document.getElementById('user-message').value.trim();
