@@ -315,8 +315,8 @@
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
         <strong>gpt-image-2 图像 API</strong><br>
-        仅支持模型 <code>gpt-image-2</code>。RomaAPI 同步路径：<code>POST /v1/images/generations</code>（文生图）、<code>POST /v1/images/edits</code>（图生图，JSON 体传 <code>image_urls</code>）。<br>
-        同步请求网关内轮询，文生图最长约 120s、编辑约 180s；超时请改用异步 API（<code>/async</code> + 任务查询）。<br>
+        仅支持模型 <code>gpt-image-2</code>。RomaAPI 路径：<code>POST /v1/images/generations</code>（文生图，同步）、<code>POST /v1/images/edits</code>（图生图，异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
+        文生图同步请求网关内轮询，最长约 180s；图生图（edits）为异步，轮询 <code>GET /v1/tasks/{task_id}</code> 取图链接。<br>
         Base URL 示例：<code>https://api.romaapi.com</code>。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
     </div>
