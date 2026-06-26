@@ -19,6 +19,8 @@ FALLBACK_MODELS = [
     "gpt-5.5",
     "gpt-5.4",
     "MiniMax-M3",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
 ]
 
 REPRESENTATIVE_BY_FAMILY = {
@@ -29,7 +31,7 @@ REPRESENTATIVE_BY_FAMILY = {
         "claude-haiku-4-5",
         "claude-opus-4-7",
     ],
-    "responses": ["gpt-5.4", "gpt-5.5"],
+    "responses": ["gpt-5.4", "gpt-5.5", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.1-pro-preview"],
     "chat": ["gpt-5.4", "MiniMax-M3"],
 }
 

@@ -25,6 +25,8 @@ def detect_endpoint_for_model(model: str) -> str:
         return "anthropic"
     if m.startswith("gpt-5."):
         return "responses"
+    if m.startswith("gemini"):
+        return "responses"
     return "chat"
 
 

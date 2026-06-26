@@ -10,6 +10,7 @@ from auto_scan.models import ComplianceCheck, ProtocolCellResult
 def test_detect_endpoint():
     assert detect_endpoint_for_model("claude-sonnet-4-6") == "anthropic"
     assert detect_endpoint_for_model("gpt-5.4") == "responses"
+    assert detect_endpoint_for_model("gemini-3.5-flash") == "responses"
     assert detect_endpoint_for_model("gpt-4o") == "chat"
 
 
