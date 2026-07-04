@@ -75,6 +75,7 @@
 
   /* Params row */
   .params-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: end; }
+  .params-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; align-items: end; }
   .param-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
   .param-field-header { min-height: 2.25rem; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; }
   .param-field label.param-label { margin: 0; font-size: 12px; line-height: 1.2; color: var(--text-dim); }
@@ -362,7 +363,7 @@
         </div>
       </div>
       <div id="image-params" style="display:none">
-        <div class="params-grid">
+        <div class="params-grid-3">
           <div class="param-field">
             <div class="param-field-header">
               <label for="image-size" class="param-label">Size</label>
@@ -389,6 +390,18 @@
               <option value="1k">1k</option>
               <option value="2k">2k</option>
               <option value="4k">4k</option>
+            </select>
+          </div>
+          <div class="param-field">
+            <div class="param-field-header">
+              <label for="image-quality" class="param-label">Quality</label>
+              <span class="param-note">可选</span>
+            </div>
+            <select id="image-quality">
+              <option value="auto" selected>auto</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
             </select>
           </div>
         </div>
@@ -1900,8 +1913,10 @@ function sanitizeImageBodyForDisplay(body) {
 async function buildImageRequestBody(ep, model, prompt) {
   const size = document.getElementById('image-size')?.value || '1:1';
   const resolution = document.getElementById('image-resolution')?.value?.trim();
+  const quality = document.getElementById('image-quality')?.value?.trim();
   const body = { model, prompt, size, n: 1 };
   if (resolution) body.resolution = resolution;
+  if (quality) body.quality = quality;
   if (ep === 'image-edit') {
     const { imageRef, maskRef, refFromFile, maskFromFile } = await resolveImageEditSources();
     body.image_urls = [imageRef];
@@ -1986,6 +2001,7 @@ let isStreaming = false;
   if (saved.useProxy !== undefined) document.getElementById('proxy-toggle').checked = saved.useProxy;
   if (saved.imageSize) document.getElementById('image-size').value = saved.imageSize;
   if (saved.imageResolution) document.getElementById('image-resolution').value = saved.imageResolution;
+  if (saved.imageQuality) document.getElementById('image-quality').value = saved.imageQuality;
   if (saved.imageRefUrl) document.getElementById('image-ref-url').value = saved.imageRefUrl;
   if (saved.imageMaskUrl) document.getElementById('image-mask-url').value = saved.imageMaskUrl;
   if (saved.cliTimeoutSec) document.getElementById('cli-timeout-sec').value = saved.cliTimeoutSec;
@@ -2022,6 +2038,7 @@ function autoSave() {
     endpoint: currentEndpoint,
     imageSize: document.getElementById('image-size')?.value,
     imageResolution: document.getElementById('image-resolution')?.value,
+    imageQuality: document.getElementById('image-quality')?.value,
     imageRefUrl: document.getElementById('image-ref-url')?.value,
     imageMaskUrl: document.getElementById('image-mask-url')?.value,
     cliTimeoutSec: document.getElementById('cli-timeout-sec')?.value,
@@ -2033,7 +2050,7 @@ function autoSave() {
   localStorage.setItem('api_test_inputs', JSON.stringify(data));
 }
 
-['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-ref-url','image-mask-url','cli-timeout-sec'].forEach(id => {
+['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-quality','image-ref-url','image-mask-url','cli-timeout-sec'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', autoSave);
   if (el && el.tagName === 'SELECT') el.addEventListener('change', autoSave);
