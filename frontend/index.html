@@ -367,17 +367,24 @@
           <div class="param-field">
             <div class="param-field-header">
               <label for="image-size" class="param-label">Size</label>
-              <span class="param-note">宽高比</span>
+              <span class="param-note">宽高比 / 像素</span>
             </div>
             <select id="image-size">
-              <option value="1:1" selected>1:1</option>
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-              <option value="4:3">4:3</option>
-              <option value="3:4">3:4</option>
-              <option value="3:2">3:2</option>
-              <option value="2:3">2:3</option>
-              <option value="auto">auto</option>
+              <optgroup label="宽高比">
+                <option value="1:1" selected>1:1</option>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+                <option value="3:2">3:2</option>
+                <option value="2:3">2:3</option>
+                <option value="auto">auto</option>
+              </optgroup>
+              <optgroup label="像素 (1:1)">
+                <option value="1024x1024">1024×1024</option>
+                <option value="2048x2048">2048×2048</option>
+                <option value="2880x2880">2880×2880</option>
+              </optgroup>
             </select>
           </div>
           <div class="param-field">
