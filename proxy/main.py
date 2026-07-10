@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from proxy_transport import post_with_proxy_retry
+from proxy_transport import get_with_proxy_retry, post_with_proxy_retry
 
 from auto_scan.routes import router as auto_scan_router
 from claude_cli_test import (
@@ -67,6 +67,7 @@ _ALLOWED_RELAY_SUFFIXES = (
     "models",
     "images/generations",
     "images/edits",
+    "tasks",
 )
 
 
@@ -236,6 +237,72 @@ async def test_codex_cli(request: Request, payload: CodexCliTestRequest) -> dict
     )
 
 
+async def _buffer_upstream_response(
+    upstream: httpx.Response,
+    client: httpx.AsyncClient,
+    prefix: bytes | None,
+) -> Response:
+    content_type = upstream.headers.get("content-type") or ""
+    media_type = upstream.headers.get("content-type")
+    try:
+        body = prefix or b""
+        body += await upstream.aread()
+    finally:
+        await upstream.aclose()
+        await client.aclose()
+    return Response(
+        content=body,
+        status_code=upstream.status_code,
+        headers=filter_response_headers(upstream.headers, buffered=True),
+        media_type=media_type,
+    )
+
+
+@app.post("/api/proxy-get")
+async def proxy_get(payload: ProxyRequest) -> Response:
+    """CORS-safe GET proxy for short polling requests (e.g. GET /v1/tasks/{id})."""
+    target = validate_target_url(payload.url.strip())
+    forward_headers = {
+        k: v
+        for k, v in payload.headers.items()
+        if k.lower() not in {"host", "content-length", "connection"}
+    }
+
+    timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+
+    try:
+        upstream, client, prefix = await get_with_proxy_retry(
+            target,
+            headers=forward_headers,
+            timeout=timeout,
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    content_type = upstream.headers.get("content-type") or ""
+    if "text/event-stream" in content_type:
+        resp_headers = filter_response_headers(upstream.headers)
+
+        async def stream_body():
+            try:
+                if prefix:
+                    yield prefix
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            stream_body(),
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            media_type=content_type,
+        )
+
+    return await _buffer_upstream_response(upstream, client, prefix)
+
+
 @app.post("/api/proxy")
 async def proxy(request: Request, payload: ProxyRequest) -> Response:
     target = validate_target_url(payload.url.strip())
@@ -267,18 +334,7 @@ async def proxy(request: Request, payload: ProxyRequest) -> Response:
 
     # 非 SSE：缓冲整包再返回，避免浏览器 fetch().json() 读 StreamingResponse 时出现 Failed to fetch
     if "text/event-stream" not in content_type:
-        try:
-            body = prefix or b""
-            body += await upstream.aread()
-        finally:
-            await upstream.aclose()
-            await client.aclose()
-        return Response(
-            content=body,
-            status_code=upstream.status_code,
-            headers=filter_response_headers(upstream.headers, buffered=True),
-            media_type=media_type,
-        )
+        return await _buffer_upstream_response(upstream, client, prefix)
 
     resp_headers = filter_response_headers(upstream.headers)
 

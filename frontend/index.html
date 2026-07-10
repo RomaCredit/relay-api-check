@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260610-cli-timeout">
+<meta name="check-build" content="20260710-image-async-v2">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -316,9 +316,9 @@
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
         <strong>gpt-image-2 图像 API</strong><br>
-        仅支持模型 <code>gpt-image-2</code>。RomaAPI 路径：<code>POST /v1/images/generations</code>（文生图，同步）、<code>POST /v1/images/edits</code>（图生图，异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
-        文生图同步请求网关内轮询，最长约 180s；图生图（edits）为异步，轮询 <code>GET /v1/tasks/{task_id}</code> 取图链接。<br>
-        Base URL 示例：<code>https://api.romaapi.com</code>。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
+        仅支持模型 <code>gpt-image-2</code>。文生图固定走 <code>POST /v1/images/generations/async</code> + 轮询 <code>GET /v1/tasks/{task_id}</code>（避免同步大体积 b64 与 Cloudflare 520/524）。<br>
+        图生图：<code>POST /v1/images/edits</code>（异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
+        Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 请开启「异步轮询」。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
     </div>
 
@@ -411,6 +411,13 @@
               <option value="high">high</option>
             </select>
           </div>
+        </div>
+        <div class="toggle-row" id="image-async-row" style="margin-top:10px;display:none">
+          <span class="toggle-label">异步轮询 <span class="label-muted">文生图固定启用</span></span>
+          <label class="toggle">
+            <input type="checkbox" id="image-async-toggle" checked disabled />
+            <span class="toggle-slider"></span>
+          </label>
         </div>
         <div id="image-edit-fields" style="display:none;margin-top:10px">
           <label for="image-ref-url">参考图 <span style="color:var(--text-dimmer)">(URL 或本地上传，二选一)</span></label>
@@ -549,6 +556,9 @@ const MODEL_PRESETS = [
 ];
 
 const GPT_IMAGE2_MODEL = 'gpt-image-2';
+const IMAGE_POLL_INTERVAL_MS = 4000;
+const IMAGE_FIRST_POLL_DELAY_MS = 3000;
+const IMAGE_ASYNC_MAX_WAIT_MS = 12 * 60 * 1000;
 const IMAGE_ENDPOINTS = ['image-gen', 'image-edit'];
 
 /** CLI / 图像端点才限制模型族；Chat / Responses / Anthropic 完全开放 */
@@ -579,6 +589,66 @@ const CLI_ENDPOINT_DEFAULT_MODEL = {
   'image-gen': GPT_IMAGE2_MODEL,
   'image-edit': GPT_IMAGE2_MODEL,
 };
+
+function isImageAsyncEnabled() {
+  return true;
+}
+
+function extractImageTaskId(json) {
+  const data = json?.data;
+  if (Array.isArray(data) && data.length > 0) {
+    const first = data[0];
+    return first?.task_id || first?.id || '';
+  }
+  if (data && typeof data === 'object') {
+    return data.id || data.task_id || '';
+  }
+  return json?.task_id || '';
+}
+
+function extractImageSubmitStatus(json) {
+  const data = json?.data;
+  if (Array.isArray(data) && data.length > 0) return data[0]?.status || 'submitted';
+  if (data && typeof data === 'object') return data.status || 'submitted';
+  return 'submitted';
+}
+
+function extractImageUrlsFromTask(data) {
+  const urls = [];
+  const images = data?.result?.images;
+  if (!Array.isArray(images)) return urls;
+  images.forEach((item) => {
+    const raw = item?.url;
+    if (Array.isArray(raw)) raw.forEach((u) => { if (u) urls.push(u); });
+    else if (typeof raw === 'string' && raw) urls.push(raw);
+  });
+  return urls;
+}
+
+function imageTaskStatusLabel(status) {
+  const map = {
+    submitted: '已提交',
+    pending: '排队中',
+    processing: '处理中',
+    completed: '已完成',
+    failed: '失败',
+  };
+  return map[status] || status || '未知';
+}
+
+function delayMs(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(new DOMException('aborted', 'AbortError'));
+    }, { once: true });
+  });
+}
 
 function isImageEndpoint(ep) {
   return IMAGE_ENDPOINTS.includes(ep);
@@ -1921,7 +1991,7 @@ async function buildImageRequestBody(ep, model, prompt) {
   const size = document.getElementById('image-size')?.value || '1:1';
   const resolution = document.getElementById('image-resolution')?.value?.trim();
   const quality = document.getElementById('image-quality')?.value?.trim();
-  const body = { model, prompt, size, n: 1 };
+  const body = { model, prompt, size, n: 1, response_format: 'url' };
   if (resolution) body.resolution = resolution;
   if (quality) body.quality = quality;
   if (ep === 'image-edit') {
@@ -1960,6 +2030,8 @@ function updateEndpointParamsUi(ep = currentEndpoint) {
   if (cliParams) cliParams.style.display = cliMode ? 'block' : 'none';
   const editFields = document.getElementById('image-edit-fields');
   if (editFields) editFields.style.display = ep === 'image-edit' ? 'block' : 'none';
+  const asyncRow = document.getElementById('image-async-row');
+  if (asyncRow) asyncRow.style.display = ep === 'image-gen' ? 'flex' : 'none';
   const sysBlock = document.getElementById('system-prompt-block');
   if (sysBlock) sysBlock.style.display = (imageMode || cliMode) ? 'none' : '';
   const label = document.getElementById('user-message-label');
@@ -1981,7 +2053,7 @@ const SPEC_REFS = {
   chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
-  'image-gen': 'POST /v1/images/generations · Authorization: Bearer · body: { model: gpt-image-2, prompt, size?, n?, resolution? }',
+  'image-gen': 'POST /v1/images/generations/async（推荐）→ GET /v1/tasks/{id} · 或同步 POST /v1/images/generations · Bearer · body: { model: gpt-image-2, prompt, size?, n?, resolution? }',
   'image-edit': 'POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[]|上传, size?, resolution?, mask_url? }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
   'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
@@ -2012,6 +2084,7 @@ let isStreaming = false;
   if (saved.imageRefUrl) document.getElementById('image-ref-url').value = saved.imageRefUrl;
   if (saved.imageMaskUrl) document.getElementById('image-mask-url').value = saved.imageMaskUrl;
   if (saved.cliTimeoutSec) document.getElementById('cli-timeout-sec').value = saved.cliTimeoutSec;
+  if (saved.imageAsync != null) document.getElementById('image-async-toggle').checked = !!saved.imageAsync;
   if (saved.endpoint) {
     const m = (saved.model || '').trim().toLowerCase();
     if (saved.endpoint === 'auto') {
@@ -2049,6 +2122,7 @@ function autoSave() {
     imageRefUrl: document.getElementById('image-ref-url')?.value,
     imageMaskUrl: document.getElementById('image-mask-url')?.value,
     cliTimeoutSec: document.getElementById('cli-timeout-sec')?.value,
+    imageAsync: document.getElementById('image-async-toggle')?.checked,
   };
   // CLI 模式不将 API Key 写入 localStorage
   if (currentEndpoint !== 'claude-cli' && currentEndpoint !== 'codex-cli') {
@@ -2057,7 +2131,7 @@ function autoSave() {
   localStorage.setItem('api_test_inputs', JSON.stringify(data));
 }
 
-['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-quality','image-ref-url','image-mask-url','cli-timeout-sec'].forEach(id => {
+['base-url','api-key','model','system-prompt','temperature','max-tokens','image-size','image-resolution','image-quality','image-ref-url','image-mask-url','cli-timeout-sec','image-async-toggle'].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', autoSave);
   if (el && el.tagName === 'SELECT') el.addEventListener('change', autoSave);
@@ -2106,6 +2180,18 @@ async function apiFetch(url, reqHeaders, body, signal) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, headers: reqHeaders, body }),
+    signal,
+  });
+}
+
+async function apiFetchGet(url, reqHeaders, signal) {
+  if (!shouldUseProxy(url)) {
+    return fetch(url, { method: 'GET', headers: reqHeaders, signal });
+  }
+  return fetch('/api/proxy-get', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, headers: reqHeaders }),
     signal,
   });
 }
@@ -2255,11 +2341,253 @@ function readOptionalTemperature() {
   return Number.isFinite(n) ? n : null;
 }
 
+async function sendImageGenAsyncRequest() {
+  const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
+  const apiKey = document.getElementById('api-key').value.trim();
+  const model = document.getElementById('model').value.trim();
+  const userMsg = document.getElementById('user-message').value.trim();
+
+  if (!baseUrl) return alert('请填写 Base URL');
+  if (!apiKey) return alert('请填写 API Key');
+  if (!model) return alert('请填写 Model');
+  if (!userMsg) return alert('请填写 Prompt');
+  if (model.toLowerCase() !== GPT_IMAGE2_MODEL) {
+    return alert(`${ENDPOINT_LABELS['image-gen']} 仅支持模型 ${GPT_IMAGE2_MODEL}`);
+  }
+
+  const submitUrl = `${baseUrl}/v1/images/generations/async`;
+  const reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  let body;
+  try {
+    body = await buildImageRequestBody('image-gen', model, userMsg);
+  } catch (e) {
+    alert(e.message);
+    return;
+  }
+
+  const viaProxy = shouldUseProxy(submitUrl);
+  if (body?._uploadMeta) delete body._uploadMeta;
+
+  isStreaming = true;
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.innerHTML = '<span>■</span> 停止';
+  sendBtn.style.background = 'var(--red)';
+  abortController = new AbortController();
+  const startTime = Date.now();
+  const signal = abortController.signal;
+
+  lastResponse.text = '';
+  lastResponse.json = null;
+  lastResponse.compliance = null;
+  lastResponse.responseDetail = null;
+  lastResponse.httpStatus = null;
+  lastResponse.error = null;
+  lastResponse.diagnosis = null;
+  lastResponse.apiFailure = null;
+  lastResponse.images = null;
+  lastResponse.responseHeaders = null;
+  lastResponse.contentType = null;
+  lastResponse.elapsed = null;
+  lastResponse.request = {
+    url: submitUrl,
+    viaProxy,
+    endpointMode: 'image-gen',
+    resolvedEndpoint: 'image-gen-async',
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey.slice(0, 8)}...`, 'Content-Type': 'application/json' },
+    body: sanitizeImageBodyForDisplay(body),
+  };
+
+  switchTab('text');
+  document.getElementById('resp-body').innerHTML = '<div class="resp-text" id="stream-text"><span class="cursor"></span></div>';
+
+  let logOutcome = null;
+  let taskId = '';
+  let lastStatus = 'submitted';
+  let pollCount = 0;
+
+  const updatePollUi = (extra = '') => {
+    const sec = Math.floor((Date.now() - startTime) / 1000);
+    const line = `${imageTaskStatusLabel(lastStatus)}… 已等待 ${sec}s · 轮询 ${pollCount} 次${taskId ? ` · task ${taskId.slice(0, 16)}` : ''}${extra ? ` · ${extra}` : ''}`;
+    updateStreamText(line + (sec > 60 ? '\n※ 2k/4k 单张约 2–5 分钟，请耐心等待。' : ''));
+  };
+
+  setStatus('loading', '提交异步文生图任务…');
+  updatePollUi();
+
+  try {
+    const submitRes = await apiFetch(submitUrl, reqHeaders, body, signal);
+    lastResponse.httpStatus = submitRes.status;
+    lastResponse.contentType = submitRes.headers.get('content-type');
+    lastResponse.responseHeaders = Object.fromEntries(submitRes.headers.entries());
+
+    const submitRaw = await submitRes.text();
+    if (!submitRes.ok) {
+      throw new Error(formatHttpError(submitRes.status, submitRaw, submitUrl, viaProxy));
+    }
+
+    let submitJson;
+    try {
+      submitJson = JSON.parse(submitRaw);
+    } catch {
+      throw new Error('提交响应不是 JSON');
+    }
+
+    taskId = extractImageTaskId(submitJson);
+    const submitCode = submitJson?.code;
+    const submitOk = submitCode == null || submitCode === 200;
+    if (!submitOk || !taskId) {
+      const msg = submitJson?.error?.message || submitJson?.message || JSON.stringify(submitJson).slice(0, 200);
+      throw new Error(`提交任务失败：${msg}`);
+    }
+
+    lastStatus = extractImageSubmitStatus(submitJson);
+    lastResponse.json = submitJson;
+    updatePollUi('已提交');
+
+    await delayMs(IMAGE_FIRST_POLL_DELAY_MS, signal);
+    const pollUrl = `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}?model=${encodeURIComponent(model)}`;
+    const pollHeaders = { Authorization: `Bearer ${apiKey}` };
+    const deadline = startTime + IMAGE_ASYNC_MAX_WAIT_MS;
+
+    while (Date.now() < deadline) {
+      if (signal.aborted) throw new DOMException('aborted', 'AbortError');
+
+      pollCount += 1;
+      setStatus('loading', `轮询任务 ${taskId.slice(0, 12)}…`);
+      updatePollUi();
+
+      let pollRes;
+      try {
+        pollRes = await apiFetchGet(pollUrl, pollHeaders, signal);
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err;
+        updatePollUi(String(err?.message || err).slice(0, 80));
+        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+        continue;
+      }
+
+      const pollRaw = await pollRes.text();
+      if (!pollRes.ok) {
+        updatePollUi(`HTTP ${pollRes.status}`);
+        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+        continue;
+      }
+
+      let pollJson;
+      try {
+        pollJson = JSON.parse(pollRaw);
+      } catch {
+        updatePollUi('响应非 JSON');
+        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+        continue;
+      }
+
+      const pollCode = pollJson?.code;
+      if (pollCode != null && pollCode !== 200) {
+        const msg = pollJson?.error?.message || pollJson?.message || `code ${pollCode}`;
+        throw new Error(`轮询失败：${msg}`);
+      }
+
+      const taskData = pollJson?.data ?? pollJson;
+      lastStatus = taskData?.status || lastStatus;
+      lastResponse.json = pollJson;
+      updatePollUi();
+
+      if (lastStatus === 'completed') {
+        const urls = extractImageUrlsFromTask(taskData);
+        if (!urls.length) {
+          throw new Error('任务已完成，但未解析到图片 URL（检查 data.result.images[0].url）');
+        }
+        const images = urls.map((url) => ({ url }));
+        const summary = `异步文生图完成 · ${urls.length} 张 · task ${taskId}`;
+        lastResponse.text = summary;
+        lastResponse.images = images;
+        lastResponse.httpStatus = 200;
+        break;
+      }
+
+      if (lastStatus === 'failed') {
+        const errMsg = taskData?.error?.message || pollJson?.error?.message || 'upstream failed';
+        throw new Error(`任务失败：${errMsg}`);
+      }
+
+      await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+    }
+
+    if (lastStatus !== 'completed') {
+      throw new Error(`轮询超时（>${Math.round(IMAGE_ASYNC_MAX_WAIT_MS / 60000)} 分钟）。task_id=${taskId || '未知'}，可稍后手动 GET /v1/tasks/{id}`);
+    }
+
+    const elapsed = Date.now() - startTime;
+    lastResponse.elapsed = elapsed;
+    lastResponse.error = null;
+    lastResponse.responseDetail = buildResponseDetail();
+    lastResponse.compliance = runComplianceCheck();
+
+    document.getElementById('resp-time').textContent = `${(elapsed / 1000).toFixed(2)}s`;
+    document.getElementById('resp-time').style.display = '';
+    document.getElementById('resp-time').className = 'meta-pill green';
+
+    showTab('text');
+    document.getElementById('resp-body').innerHTML = renderImageResponseHtml(lastResponse.images, lastResponse.text);
+
+    setStatus('ok', `完成 · ${(elapsed / 1000).toFixed(2)}s · 异步轮询`);
+    logOutcome = true;
+    addHistory({
+      time: new Date().toLocaleTimeString(),
+      model,
+      endpoint: 'image-gen',
+      question: userMsg.slice(0, 60),
+      status: 'ok',
+      answer: lastResponse.text.slice(0, 100),
+    });
+  } catch (err) {
+    const errMsg = err?.message || String(err);
+    if (err.name === 'AbortError') {
+      setStatus('ok', '已停止');
+      logOutcome = false;
+    } else {
+      logOutcome = false;
+      setStatus('err', '请求失败');
+      lastResponse.error = errMsg;
+      lastResponse.json = lastResponse.json || { error: errMsg };
+      if (!lastResponse.elapsed) lastResponse.elapsed = Date.now() - startTime;
+      lastResponse.responseDetail = buildResponseDetail();
+      lastResponse.compliance = runComplianceCheck();
+      switchTab('text');
+      document.getElementById('resp-body').innerHTML = renderErrorBlock(errMsg, lastResponse.diagnosis);
+      document.getElementById('resp-time').textContent = '失败';
+      document.getElementById('resp-time').style.display = '';
+      document.getElementById('resp-time').className = 'meta-pill red';
+      addHistory({
+        time: new Date().toLocaleTimeString(),
+        model,
+        endpoint: 'image-gen',
+        question: userMsg.slice(0, 60),
+        status: 'err',
+        answer: errMsg.slice(0, 100),
+      });
+    }
+  } finally {
+    isStreaming = false;
+    sendBtn.innerHTML = '<span>▶</span> 发送';
+    sendBtn.style.background = '';
+    abortController = null;
+    if (logOutcome !== null && lastResponse.request) {
+      const saved = await persistCheckLogToServer(logOutcome);
+      const st = document.getElementById('status-text');
+      if (saved && st) st.textContent = `${st.textContent} · 已入库`;
+    }
+  }
+}
+
 async function sendRequest() {
   if (isStreaming) { abortController?.abort(); return; }
   if (isClaudeCliMode()) return sendClaudeCliRequest();
   if (isCodexCliMode()) return sendCodexCliRequest();
   if (!assertEndpointModelCompatible()) return;
+  if (currentEndpoint === 'image-gen') return sendImageGenAsyncRequest();
 
   const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
@@ -2279,7 +2607,9 @@ async function sendRequest() {
   }
 
   setStatus('loading', isImageEndpoint(currentEndpoint)
-    ? (currentEndpoint === 'image-edit' ? '图生图请求中（同步最长约 180s）…' : '文生图请求中（同步最长约 120s）…')
+    ? (currentEndpoint === 'image-edit'
+      ? '图生图请求中（同步最长约 180s）…'
+      : '文生图同步请求中（Cloudflare 约 120s 可能 524）…')
     : '请求中...');
   isStreaming = true;
   const sendBtn = document.getElementById('send-btn');
@@ -2652,6 +2982,7 @@ function runComplianceCheck() {
     responses: '/v1/responses',
     anthropic: '/v1/messages',
     'image-gen': '/v1/images/generations',
+    'image-gen-async': '/v1/images/generations/async',
     'image-edit': '/v1/images/edits',
   }[ep];
   let matchedPath = null;
@@ -2874,7 +3205,7 @@ async function persistCheckLogToServer(overallOk, attempt = 0) {
     const baseUrl = (document.getElementById('base-url').value || '').trim().replace(/\/$/, '');
     if (!baseUrl) return false;
     let resolved = req.resolvedEndpoint || getResolvedEndpoint();
-    if (!['chat', 'responses', 'anthropic', 'image-gen', 'image-edit'].includes(resolved)) resolved = getResolvedEndpoint();
+    if (!['chat', 'responses', 'anthropic', 'image-gen', 'image-gen-async', 'image-edit'].includes(resolved)) resolved = getResolvedEndpoint();
     const modelName = (req.body && req.body.model) || document.getElementById('model').value || 'unknown';
     const payload = {
       baseUrl,
