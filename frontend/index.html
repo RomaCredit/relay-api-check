@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260716-image-sync-b64-v1">
+<meta name="check-build" content="20260717-gemini-image-preview-v1">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -315,8 +315,8 @@
         <span style="color:var(--yellow)">流式 (Stream) 在此模式下无效。</span> 服务器须已安装 <code>codex</code> 命令（VPS/Docker，非 Serverless）。
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
-        <strong>gpt-image-2 图像 API</strong><br>
-        仅支持模型 <code>gpt-image-2</code>。文生图固定走 <code>POST /v1/images/generations/async</code> + 轮询 <code>GET /v1/tasks/{task_id}</code>（避免同步大体积 b64 与 Cloudflare 520/524）。<br>
+        <strong>图像生成 API</strong><br>
+        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image-preview</code>。Gemini 生图走 <code>POST /v1/chat/completions</code>，并自动预览回复中的 Base64 图片；<code>gpt-image-2</code> 走 Images API。<br>
         图生图：<code>POST /v1/images/edits</code>（异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
         Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 请开启「异步轮询」。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
@@ -555,10 +555,12 @@ const MODEL_PRESETS = [
   { label: 'Gemini 3.1 Pro', value: 'gemini-3.1-pro-preview' },
   { label: 'Gemini 3.5 Flash', value: 'gemini-3.5-flash' },
   { label: 'Gemini 3.1 Flash-Lite', value: 'gemini-3.1-flash-lite' },
+  { label: 'Gemini 3.1 Flash Image', value: 'gemini-3.1-flash-image-preview' },
   { label: 'GPT-Image-2', value: 'gpt-image-2' },
 ];
 
 const GPT_IMAGE2_MODEL = 'gpt-image-2';
+const GEMINI_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
 const IMAGE_POLL_INTERVAL_MS = 4000;
 const IMAGE_FIRST_POLL_DELAY_MS = 3000;
 const IMAGE_ASYNC_MAX_WAIT_MS = 12 * 60 * 1000;
@@ -573,7 +575,7 @@ const CLI_ENDPOINT_MODEL_FAMILIES = {
 };
 
 const IMAGE_ENDPOINT_MODELS = {
-  'image-gen': [GPT_IMAGE2_MODEL],
+  'image-gen': [GPT_IMAGE2_MODEL, GEMINI_IMAGE_MODEL],
   'image-edit': [GPT_IMAGE2_MODEL],
 };
 
@@ -680,7 +682,7 @@ function detectModelFamily(model) {
 function endpointAllowsModel(ep, model) {
   if (isHttpOpenEndpoint(ep)) return true;
   const m = (model || '').trim().toLowerCase();
-  if (isImageEndpoint(ep)) return m === GPT_IMAGE2_MODEL;
+  if (isImageEndpoint(ep)) return (IMAGE_ENDPOINT_MODELS[ep] || []).includes(m);
   const families = CLI_ENDPOINT_MODEL_FAMILIES[ep];
   if (!families) return true;
   const family = detectModelFamily(model);
@@ -717,7 +719,7 @@ function endpointModelRuleHint(ep) {
     return `${ENDPOINT_LABELS[ep] || ep}：任意模型均可测试`;
   }
   if (isImageEndpoint(ep)) {
-    return `${ENDPOINT_LABELS[ep] || ep} 端点仅支持 ${GPT_IMAGE2_MODEL}`;
+    return `${ENDPOINT_LABELS[ep] || ep} 端点支持：${(IMAGE_ENDPOINT_MODELS[ep] || []).join('、')}`;
   }
   const families = CLI_ENDPOINT_MODEL_FAMILIES[ep] || [];
   const labels = families.map((f) => MODEL_FAMILY_LABELS[f] || f).join('、');
@@ -789,7 +791,7 @@ function onModelInput() {
 function detectEndpoint(model) {
   if (!model) return 'chat';
   const m = model.toLowerCase();
-  if (m === GPT_IMAGE2_MODEL) return 'image-gen';
+  if (m === GPT_IMAGE2_MODEL || m === GEMINI_IMAGE_MODEL) return 'image-gen';
   if (m.startsWith('claude')) return 'anthropic';
   if (m.startsWith('gemini')) return 'responses';
   if (m === 'gpt-5.4' || m === 'gpt-5.5') return 'responses';
@@ -827,7 +829,12 @@ function analyzeApiResponse(json) {
     json.output_text;
 
   if (typeof text === 'string' && text.trim()) {
-    return { ok: true, text };
+    const images = extractInlineImages(text);
+    return {
+      ok: true,
+      text: images.length ? `成功返回 ${images.length} 张图片（见预览）` : text,
+      images: images.length ? images : null,
+    };
   }
 
   if (Array.isArray(json.data) && json.data.length) {
@@ -846,6 +853,22 @@ function analyzeApiResponse(json) {
   }
 
   return { ok: false, code: 'no_assistant_content', reason: '响应中无 choices / content / output 等模型回复字段' };
+}
+
+/** 提取 Gemini 图像模型在 OpenAI 兼容回复中返回的 Markdown/data URI 图片。 */
+function extractInlineImages(content) {
+  const images = [];
+  const seen = new Set();
+  const pattern = /data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=_-]+)/gi;
+  for (const match of String(content || '').matchAll(pattern)) {
+    const mimeType = match[1].toLowerCase();
+    const b64 = match[2];
+    const key = `${mimeType}:${b64.slice(0, 64)}:${b64.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    images.push({ b64_json: b64, mime_type: mimeType });
+  }
+  return images;
 }
 
 /** 从单条 OpenAI/Anthropic/Responses 流式 chunk 提取可见正文 */
@@ -2010,10 +2033,10 @@ async function buildImageRequestBody(ep, model, prompt) {
 function renderImageResponseHtml(images, summaryText) {
   const cards = (images || []).map((item, idx) => {
     const src = item?.b64_json
-      ? `data:image/png;base64,${item.b64_json}`
+      ? `data:${item.mime_type || 'image/png'};base64,${item.b64_json}`
       : (item?.url || '');
     if (!src) return `<div class="image-preview-card">#${idx + 1}：无 b64_json / url</div>`;
-    const meta = item.url ? escapeHtml(item.url) : `b64_json (${String(item.b64_json || '').length} chars)`;
+    const meta = item.url ? escapeHtml(item.url) : `${escapeHtml(item.mime_type || 'image/png')} · b64_json (${String(item.b64_json || '').length} chars)`;
     return `<div class="image-preview-card">
       <img src="${src}" alt="generated ${idx + 1}" loading="lazy" />
       <div class="image-preview-meta">#${idx + 1} · ${meta}</div>
@@ -2055,7 +2078,7 @@ const SPEC_REFS = {
   chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
-  'image-gen': '同步 POST /v1/images/generations · Bearer · body: { model: gpt-image-2, prompt, size?, n?, resolution?, quality?, response_format? }',
+  'image-gen': 'gpt-image-2: POST /v1/images/generations；gemini-3.1-flash-image-preview: POST /v1/chat/completions，并解析 Markdown Base64 图片',
   'image-edit': '同步 POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[]|上传, size?, resolution?, quality?, response_format?, mask_url? }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
   'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
@@ -2602,8 +2625,8 @@ async function sendRequest() {
   if (!apiKey) return alert('请填写 API Key');
   if (!model) return alert('请填写 Model');
   if (!userMsg) return alert(isImageEndpoint(currentEndpoint) ? '请填写 Prompt' : '请填写 User Message');
-  if (isImageEndpoint(currentEndpoint) && model.toLowerCase() !== GPT_IMAGE2_MODEL) {
-    return alert(`${ENDPOINT_LABELS[currentEndpoint]} 仅支持模型 ${GPT_IMAGE2_MODEL}`);
+  if (isImageEndpoint(currentEndpoint) && !endpointAllowsModel(currentEndpoint, model)) {
+    return alert(endpointModelRuleHint(currentEndpoint));
   }
 
   setStatus('loading', isImageEndpoint(currentEndpoint)
@@ -2639,9 +2662,18 @@ async function sendRequest() {
   const resolvedEndpoint = getResolvedEndpoint();
   let url, body, reqHeaders;
   if (resolvedEndpoint === 'image-gen') {
-    url = `${baseUrl}/v1/images/generations`;
-    try { body = await buildImageRequestBody('image-gen', model, userMsg); }
-    catch (e) { alert(e.message); isStreaming = false; sendBtn.innerHTML = '<span id="send-icon">▶</span> 发送'; sendBtn.style.background = ''; return; }
+    if (model.toLowerCase() === GEMINI_IMAGE_MODEL) {
+      url = `${baseUrl}/v1/chat/completions`;
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      messages.push({ role: 'user', content: userMsg });
+      body = { model, messages, max_tokens: maxTokens, stream: false };
+      if (temperature != null) body.temperature = temperature;
+    } else {
+      url = `${baseUrl}/v1/images/generations`;
+      try { body = await buildImageRequestBody('image-gen', model, userMsg); }
+      catch (e) { alert(e.message); isStreaming = false; sendBtn.innerHTML = '<span id="send-icon">▶</span> 发送'; sendBtn.style.background = ''; return; }
+    }
     reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   } else if (resolvedEndpoint === 'image-edit') {
     url = `${baseUrl}/v1/images/edits`;
