@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260717-gemini-image-preview-v1">
+<meta name="check-build" content="20260717-gemini-image-size-v2">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2668,6 +2668,10 @@ async function sendRequest() {
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
       messages.push({ role: 'user', content: userMsg });
       body = { model, messages, max_tokens: maxTokens, stream: false };
+      const imageSize = document.getElementById('image-size')?.value?.trim();
+      const imageResolution = document.getElementById('image-resolution')?.value?.trim();
+      if (imageSize) body.size = imageSize;
+      if (imageResolution) body.resolution = imageResolution;
       if (temperature != null) body.temperature = temperature;
     } else {
       url = `${baseUrl}/v1/images/generations`;
