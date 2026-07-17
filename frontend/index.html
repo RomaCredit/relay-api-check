@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260717-gemini-image-size-v2">
+<meta name="check-build" content="20260717-gemini-images-api-v3">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -316,7 +316,7 @@
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
         <strong>图像生成 API</strong><br>
-        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image-preview</code>。Gemini 生图走 <code>POST /v1/chat/completions</code>，并自动预览回复中的 Base64 图片；<code>gpt-image-2</code> 走 Images API。<br>
+        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image-preview</code>，文生图均走 <code>POST /v1/images/generations</code>。Gemini 请求会透传 <code>size</code>、<code>resolution</code> 和 <code>n: 1</code>。<br>
         图生图：<code>POST /v1/images/edits</code>（异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
         Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 请开启「异步轮询」。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
@@ -2078,7 +2078,7 @@ const SPEC_REFS = {
   chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
-  'image-gen': 'gpt-image-2: POST /v1/images/generations；gemini-3.1-flash-image-preview: POST /v1/chat/completions，并解析 Markdown Base64 图片',
+  'image-gen': 'POST /v1/images/generations · Gemini body: { model, prompt, size, resolution?, n: 1 }',
   'image-edit': '同步 POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[]|上传, size?, resolution?, quality?, response_format?, mask_url? }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
   'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
@@ -2663,16 +2663,11 @@ async function sendRequest() {
   let url, body, reqHeaders;
   if (resolvedEndpoint === 'image-gen') {
     if (model.toLowerCase() === GEMINI_IMAGE_MODEL) {
-      url = `${baseUrl}/v1/chat/completions`;
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      messages.push({ role: 'user', content: userMsg });
-      body = { model, messages, max_tokens: maxTokens, stream: false };
+      url = `${baseUrl}/v1/images/generations`;
       const imageSize = document.getElementById('image-size')?.value?.trim();
       const imageResolution = document.getElementById('image-resolution')?.value?.trim();
-      if (imageSize) body.size = imageSize;
-      if (imageResolution) body.resolution = imageResolution;
-      if (temperature != null) body.temperature = temperature;
+      body = { model, prompt: userMsg, size: imageSize || '1:1', n: 1 };
+      if (imageResolution) body.resolution = imageResolution.toUpperCase();
     } else {
       url = `${baseUrl}/v1/images/generations`;
       try { body = await buildImageRequestBody('image-gen', model, userMsg); }
