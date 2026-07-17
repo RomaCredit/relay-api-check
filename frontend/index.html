@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<meta name="check-build" content="20260717-gemini-image-poll-v4">
+<meta name="check-build" content="20260717-gemini-sync-v5">
 <title>Relay API Check — 中转站 API 兼容性检测</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2622,9 +2622,6 @@ async function sendRequest() {
   if (isStreaming) { abortController?.abort(); return; }
   if (isClaudeCliMode()) return sendClaudeCliRequest();
   if (isCodexCliMode()) return sendCodexCliRequest();
-  if (currentEndpoint === 'image-gen' && document.getElementById('model').value.trim().toLowerCase() === GEMINI_IMAGE_MODEL) {
-    return sendImageGenAsyncRequest();
-  }
   if (!assertEndpointModelCompatible()) return;
   const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
