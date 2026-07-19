@@ -316,7 +316,7 @@
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
         <strong>图像生成 API</strong><br>
-        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image-preview</code>。Gemini 文生图走 <code>POST /v1/images/generations</code>，收到 <code>task_id</code> 后自动轮询 <code>GET /v1/tasks/{task_id}</code> 并展示图片。<br>
+        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image</code>。Gemini 文生图走 <code>POST /v1/images/generations</code>，收到 <code>task_id</code> 后自动轮询 <code>GET /v1/tasks/{task_id}</code> 并展示图片。<br>
         图生图：<code>POST /v1/images/edits</code>（异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
         Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 请开启「异步轮询」。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
@@ -555,12 +555,12 @@ const MODEL_PRESETS = [
   { label: 'Gemini 3.1 Pro', value: 'gemini-3.1-pro-preview' },
   { label: 'Gemini 3.5 Flash', value: 'gemini-3.5-flash' },
   { label: 'Gemini 3.1 Flash-Lite', value: 'gemini-3.1-flash-lite' },
-  { label: 'Gemini 3.1 Flash Image', value: 'gemini-3.1-flash-image-preview' },
+  { label: 'Gemini 3.1 Flash Image', value: 'gemini-3.1-flash-image' },
   { label: 'GPT-Image-2', value: 'gpt-image-2' },
 ];
 
 const GPT_IMAGE2_MODEL = 'gpt-image-2';
-const GEMINI_IMAGE_MODEL = 'gemini-3.1-flash-image-preview';
+const GEMINI_IMAGE_MODEL = 'gemini-3.1-flash-image';
 const IMAGE_POLL_INTERVAL_MS = 4000;
 const IMAGE_FIRST_POLL_DELAY_MS = 3000;
 const IMAGE_ASYNC_MAX_WAIT_MS = 12 * 60 * 1000;
