@@ -316,9 +316,9 @@
       </div>
       <div id="image-hint" class="ep-hint" style="display:none">
         <strong>图像生成 API</strong><br>
-        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image</code>。Gemini 文生图走 <code>POST /v1/images/generations</code>，收到 <code>task_id</code> 后自动轮询 <code>GET /v1/tasks/{task_id}</code> 并展示图片。<br>
+        支持 <code>gpt-image-2</code> 与 <code>gemini-3.1-flash-image</code>。文生图走 <code>POST /v1/images/generations</code>；接口直接返回图片时立即展示，返回 <code>task_id</code> 时自动轮询 <code>GET /v1/tasks/{task_id}</code>。<br>
         图生图：<code>POST /v1/images/edits</code>（异步，轮询 <code>GET /v1/tasks/{task_id}</code>）。<br>
-        Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 请开启「异步轮询」。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
+        Base URL 示例：<code>https://api.romaapi.com</code>。2k/4k 通常耗时更长，页面会持续轮询。图生图可<strong>本地上传</strong>参考图/遮罩（单张建议 &lt; 10MB）。
       </div>
     </div>
 
@@ -618,16 +618,19 @@ function extractImageSubmitStatus(json) {
   return 'submitted';
 }
 
-function extractImageUrlsFromTask(data) {
-  const urls = [];
+function extractImagesFromTask(data) {
+  const normalized = [];
   const images = data?.result?.images;
-  if (!Array.isArray(images)) return urls;
+  if (!Array.isArray(images)) return normalized;
   images.forEach((item) => {
     const raw = item?.url;
-    if (Array.isArray(raw)) raw.forEach((u) => { if (u) urls.push(u); });
-    else if (typeof raw === 'string' && raw) urls.push(raw);
+    if (Array.isArray(raw)) raw.forEach((url) => { if (url) normalized.push({ url }); });
+    else if (typeof raw === 'string' && raw) normalized.push({ url: raw });
+    if (typeof item?.b64_json === 'string' && item.b64_json) {
+      normalized.push({ b64_json: item.b64_json, mime_type: item.mime_type || 'image/png' });
+    }
   });
-  return urls;
+  return normalized;
 }
 
 function imageTaskStatusLabel(status) {
@@ -2079,7 +2082,7 @@ const SPEC_REFS = {
   chat: 'POST /v1/chat/completions · Authorization: Bearer · body: { model, messages[], temperature?, max_tokens, stream }',
   responses: 'POST /v1/responses · Authorization: Bearer · body: { model, input, instructions?, max_output_tokens, temperature?, stream }',
   anthropic: 'POST /v1/messages · x-api-key + anthropic-version · body: { model, messages[], system?, max_tokens, temperature?, stream }',
-  'image-gen': 'POST /v1/images/generations · Gemini body: { model, prompt, size, resolution?, n: 1 }',
+  'image-gen': 'POST /v1/images/generations · body: { model, prompt, size, resolution?, quality?, response_format?, n } · 支持直接图片或 task_id + GET /v1/tasks/{task_id}',
   'image-edit': '同步 POST /v1/images/edits · Authorization: Bearer · JSON: { model: gpt-image-2, prompt, image_urls[]|上传, size?, resolution?, quality?, response_format?, mask_url? }',
   'claude-cli': '子进程: claude -p "<prompt>" · env: ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL? · 非 HTTP /v1/messages',
   'codex-cli': '子进程: codex exec "<prompt>" · env: OPENAI_API_KEY, -c openai_base_url=BaseURL/v1, -m model? · 非 HTTP /v1/responses',
@@ -2367,7 +2370,7 @@ function readOptionalTemperature() {
   return Number.isFinite(n) ? n : null;
 }
 
-async function sendImageGenAsyncRequest() {
+async function sendImageGenRequest() {
   const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
   const model = document.getElementById('model').value.trim();
@@ -2382,9 +2385,10 @@ async function sendImageGenAsyncRequest() {
   }
 
   const isGeminiImage = model.toLowerCase() === GEMINI_IMAGE_MODEL;
-  const submitUrl = isGeminiImage
-    ? `${baseUrl}/v1/images/generations`
-    : `${baseUrl}/v1/images/generations/async`;
+  // Always start with the standard Images endpoint. Compatible providers may
+  // either return the image directly or return a task_id; both shapes are
+  // handled below. This also avoids requiring a non-standard /async endpoint.
+  const submitUrl = `${baseUrl}/v1/images/generations`;
   const reqHeaders = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   let body;
   try {
@@ -2428,7 +2432,7 @@ async function sendImageGenAsyncRequest() {
     url: submitUrl,
     viaProxy,
     endpointMode: 'image-gen',
-    resolvedEndpoint: 'image-gen-async',
+    resolvedEndpoint: 'image-gen',
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey.slice(0, 8)}...`, 'Content-Type': 'application/json' },
     body: sanitizeImageBodyForDisplay(body),
@@ -2448,7 +2452,7 @@ async function sendImageGenAsyncRequest() {
     updateStreamText(line + (sec > 60 ? '\n※ 2k/4k 单张约 2–5 分钟，请耐心等待。' : ''));
   };
 
-  setStatus('loading', '提交异步文生图任务…');
+  setStatus('loading', '提交文生图请求…');
   updatePollUi();
 
   try {
@@ -2469,90 +2473,97 @@ async function sendImageGenAsyncRequest() {
       throw new Error('提交响应不是 JSON');
     }
 
-    taskId = extractImageTaskId(submitJson);
-    const submitCode = submitJson?.code;
-    const submitOk = submitCode == null || submitCode === 200;
-    if (!submitOk || !taskId) {
-      const msg = submitJson?.error?.message || submitJson?.message || JSON.stringify(submitJson).slice(0, 200);
-      throw new Error(`提交任务失败：${msg}`);
-    }
-
-    lastStatus = extractImageSubmitStatus(submitJson);
     lastResponse.json = submitJson;
-    updatePollUi('已提交');
-
-    await delayMs(IMAGE_FIRST_POLL_DELAY_MS, signal);
-    const pollUrl = `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}?model=${encodeURIComponent(model)}`;
-    const pollHeaders = { Authorization: `Bearer ${apiKey}` };
-    const deadline = startTime + IMAGE_ASYNC_MAX_WAIT_MS;
-
-    while (Date.now() < deadline) {
-      if (signal.aborted) throw new DOMException('aborted', 'AbortError');
-
-      pollCount += 1;
-      setStatus('loading', `轮询任务 ${taskId.slice(0, 12)}…`);
-      updatePollUi();
-
-      let pollRes;
-      try {
-        pollRes = await apiFetchGet(pollUrl, pollHeaders, signal);
-      } catch (err) {
-        if (err?.name === 'AbortError') throw err;
-        updatePollUi(String(err?.message || err).slice(0, 80));
-        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
-        continue;
+    const directResult = analyzeApiResponse(submitJson);
+    if (directResult.ok && directResult.images?.length) {
+      lastStatus = 'succeeded';
+      lastResponse.text = directResult.text;
+      lastResponse.images = directResult.images;
+      lastResponse.httpStatus = submitRes.status;
+    } else {
+      taskId = extractImageTaskId(submitJson);
+      const submitCode = submitJson?.code;
+      const submitOk = submitCode == null || submitCode === 200;
+      if (!submitOk || !taskId) {
+        const msg = submitJson?.error?.message || submitJson?.message || directResult.reason || JSON.stringify(submitJson).slice(0, 200);
+        throw new Error(`提交任务失败：${msg}`);
       }
 
-      const pollRaw = await pollRes.text();
-      if (!pollRes.ok) {
-        updatePollUi(`HTTP ${pollRes.status}`);
-        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
-        continue;
-      }
+      lastStatus = extractImageSubmitStatus(submitJson);
+      updatePollUi('已提交');
 
-      let pollJson;
-      try {
-        pollJson = JSON.parse(pollRaw);
-      } catch {
-        updatePollUi('响应非 JSON');
-        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
-        continue;
-      }
+      await delayMs(IMAGE_FIRST_POLL_DELAY_MS, signal);
+      const pollUrl = `${baseUrl}/v1/tasks/${encodeURIComponent(taskId)}?model=${encodeURIComponent(model)}`;
+      const pollHeaders = { Authorization: `Bearer ${apiKey}` };
+      const deadline = startTime + IMAGE_ASYNC_MAX_WAIT_MS;
 
-      const pollCode = pollJson?.code;
-      if (pollCode != null && pollCode !== 200) {
-        const msg = pollJson?.error?.message || pollJson?.message || `code ${pollCode}`;
-        throw new Error(`轮询失败：${msg}`);
-      }
+      while (Date.now() < deadline) {
+        if (signal.aborted) throw new DOMException('aborted', 'AbortError');
 
-      const taskData = pollJson?.data ?? pollJson;
-      lastStatus = taskData?.status || lastStatus;
-      lastResponse.json = pollJson;
-      updatePollUi();
+        pollCount += 1;
+        setStatus('loading', `轮询任务 ${taskId.slice(0, 12)}…`);
+        updatePollUi();
 
-      if (lastStatus === 'completed' || lastStatus === 'succeeded') {
-        const urls = extractImageUrlsFromTask(taskData);
-        if (!urls.length) {
-          throw new Error('任务已完成，但未解析到图片 URL（检查 data.result.images[0].url）');
+        let pollRes;
+        try {
+          pollRes = await apiFetchGet(pollUrl, pollHeaders, signal);
+        } catch (err) {
+          if (err?.name === 'AbortError') throw err;
+          updatePollUi(String(err?.message || err).slice(0, 80));
+          await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+          continue;
         }
-        const images = urls.map((url) => ({ url }));
-        const summary = `异步文生图完成 · ${urls.length} 张 · task ${taskId}`;
-        lastResponse.text = summary;
-        lastResponse.images = images;
-        lastResponse.httpStatus = 200;
-        break;
+
+        const pollRaw = await pollRes.text();
+        if (!pollRes.ok) {
+          updatePollUi(`HTTP ${pollRes.status}`);
+          await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+          continue;
+        }
+
+        let pollJson;
+        try {
+          pollJson = JSON.parse(pollRaw);
+        } catch {
+          updatePollUi('响应非 JSON');
+          await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
+          continue;
+        }
+
+        const pollCode = pollJson?.code;
+        if (pollCode != null && pollCode !== 200) {
+          const msg = pollJson?.error?.message || pollJson?.message || `code ${pollCode}`;
+          throw new Error(`轮询失败：${msg}`);
+        }
+
+        const taskData = pollJson?.data ?? pollJson;
+        lastStatus = taskData?.status || lastStatus;
+        lastResponse.json = pollJson;
+        updatePollUi();
+
+        if (lastStatus === 'completed' || lastStatus === 'succeeded') {
+          const images = extractImagesFromTask(taskData);
+          if (!images.length) {
+            throw new Error('任务已完成，但未解析到图片（检查 data.result.images[].url / b64_json）');
+          }
+          const summary = `异步文生图完成 · ${images.length} 张 · task ${taskId}`;
+          lastResponse.text = summary;
+          lastResponse.images = images;
+          lastResponse.httpStatus = 200;
+          break;
+        }
+
+        if (lastStatus === 'failed') {
+          const errMsg = taskData?.error?.message || pollJson?.error?.message || 'upstream failed';
+          throw new Error(`任务失败：${errMsg}`);
+        }
+
+        await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
       }
 
-      if (lastStatus === 'failed') {
-        const errMsg = taskData?.error?.message || pollJson?.error?.message || 'upstream failed';
-        throw new Error(`任务失败：${errMsg}`);
+      if (lastStatus !== 'completed' && lastStatus !== 'succeeded') {
+        throw new Error(`轮询超时（>${Math.round(IMAGE_ASYNC_MAX_WAIT_MS / 60000)} 分钟）。task_id=${taskId || '未知'}，可稍后手动 GET /v1/tasks/{id}`);
       }
-
-      await delayMs(IMAGE_POLL_INTERVAL_MS, signal);
-    }
-
-    if (lastStatus !== 'completed' && lastStatus !== 'succeeded') {
-      throw new Error(`轮询超时（>${Math.round(IMAGE_ASYNC_MAX_WAIT_MS / 60000)} 分钟）。task_id=${taskId || '未知'}，可稍后手动 GET /v1/tasks/{id}`);
     }
 
     const elapsed = Date.now() - startTime;
@@ -2568,7 +2579,9 @@ async function sendImageGenAsyncRequest() {
     showTab('text');
     document.getElementById('resp-body').innerHTML = renderImageResponseHtml(lastResponse.images, lastResponse.text);
 
-    setStatus('ok', `完成 · ${(elapsed / 1000).toFixed(2)}s · 异步轮询`);
+    setStatus('ok', taskId
+      ? `完成 · ${(elapsed / 1000).toFixed(2)}s · 异步轮询`
+      : `完成 · ${(elapsed / 1000).toFixed(2)}s · 同步图片`);
     logOutcome = true;
     addHistory({
       time: new Date().toLocaleTimeString(),
@@ -2623,6 +2636,9 @@ async function sendRequest() {
   if (isClaudeCliMode()) return sendClaudeCliRequest();
   if (isCodexCliMode()) return sendCodexCliRequest();
   if (!assertEndpointModelCompatible()) return;
+  if (currentEndpoint === 'image-gen' && isImageAsyncEnabled()) {
+    return sendImageGenRequest();
+  }
   const baseUrl = document.getElementById('base-url').value.trim().replace(/\/$/, '');
   const apiKey = document.getElementById('api-key').value.trim();
   const model = document.getElementById('model').value.trim();
